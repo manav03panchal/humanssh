@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/longbridgeapp/gpui-component/main/crates/story/themes/schema.json",
+  "name": "Gruvbox",
+  "author": "Pavel Pertsev",
+  "themes": [
+    {
+      "name": "Gruvbox Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "#282828",
+        "foreground": "#ebdbb2",
+        "border": "#3c3836",
+        "accent.background": "#458588",
+        "accent.foreground": "#ebdbb2",
+        "primary.background": "#458588",
+        "primary.foreground": "#ebdbb2",
+        "secondary.background": "#3c3836",
+        "secondary.foreground": "#ebdbb2",
+        "muted.foreground": "#928374",
+        "title_bar.background": "#1d2021",
+        "tab.active.background": "#3c3836",
+        "tab.inactive.background": "#282828",
+        "panel.background": "#1d2021",
+        "list.active.background": "#3c3836",
+        "list.hover.background": "#504945",
+        "base.red": "#cc241d",
+        "base.green": "#98971a",
+        "base.yellow": "#d79921",
+        "base.blue": "#458588",
+        "base.magenta": "#b16286",
+        "base.cyan": "#689d6a",
+        "caret": "#ebdbb2",
+        "selection": "#504945"
+      }
+    },
+    {
+      "name": "Gruvbox Light",
+      "mode": "light",
+      "colors": {
+        "background": "#fbf1c7",
+        "foreground": "#3c3836",
+        "border": "#d5c4a1",
+        "accent.background": "#076678",
+        "accent.foreground": "#fbf1c7",
+        "primary.background": "#076678",
+        "primary.foreground": "#fbf1c7",
+        "secondary.background": "#ebdbb2",
+        "secondary.foreground": "#3c3836",
+        "muted.foreground": "#928374",
+        "title_bar.background": "#f9f5d7",
+        "tab.active.background": "#ebdbb2",
+        "tab.inactive.background": "#fbf1c7",
+        "panel.background": "#f9f5d7",
+        "list.active.background": "#ebdbb2",
+        "list.hover.background": "#d5c4a1",
+        "base.red": "#9d0006",
+        "base.green": "#79740e",
+        "base.yellow": "#b57614",
+        "base.blue": "#076678",
+        "base.magenta": "#8f3f71",
+        "base.cyan": "#427b58",
+        "caret": "#3c3836",
+        "selection": "#d5c4a1"
+      }
+    }
+  ]
+}

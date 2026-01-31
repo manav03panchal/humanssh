@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/longbridgeapp/gpui-component/main/crates/story/themes/schema.json",
+  "name": "Catppuccin",
+  "author": "Catppuccin",
+  "themes": [
+    {
+      "name": "Catppuccin Mocha",
+      "mode": "dark",
+      "colors": {
+        "background": "#1e1e2e",
+        "foreground": "#cdd6f4",
+        "border": "#313244",
+        "accent.background": "#89b4fa",
+        "accent.foreground": "#1e1e2e",
+        "primary.background": "#89b4fa",
+        "primary.foreground": "#1e1e2e",
+        "secondary.background": "#313244",
+        "secondary.foreground": "#cdd6f4",
+        "muted.foreground": "#6c7086",
+        "title_bar.background": "#181825",
+        "tab.active.background": "#313244",
+        "tab.inactive.background": "#1e1e2e",
+        "panel.background": "#181825",
+        "list.active.background": "#313244",
+        "list.hover.background": "#45475a",
+        "base.red": "#f38ba8",
+        "base.green": "#a6e3a1",
+        "base.yellow": "#f9e2af",
+        "base.blue": "#89b4fa",
+        "base.magenta": "#f5c2e7",
+        "base.cyan": "#94e2d5",
+        "caret": "#f5e0dc",
+        "selection": "#45475a"
+      }
+    },
+    {
+      "name": "Catppuccin Latte",
+      "mode": "light",
+      "colors": {
+        "background": "#eff1f5",
+        "foreground": "#4c4f69",
+        "border": "#ccd0da",
+        "accent.background": "#1e66f5",
+        "accent.foreground": "#eff1f5",
+        "primary.background": "#1e66f5",
+        "primary.foreground": "#eff1f5",
+        "secondary.background": "#ccd0da",
+        "secondary.foreground": "#4c4f69",
+        "muted.foreground": "#8c8fa1",
+        "title_bar.background": "#e6e9ef",
+        "tab.active.background": "#ccd0da",
+        "tab.inactive.background": "#eff1f5",
+        "panel.background": "#e6e9ef",
+        "list.active.background": "#ccd0da",
+        "list.hover.background": "#bcc0cc",
+        "base.red": "#d20f39",
+        "base.green": "#40a02b",
+        "base.yellow": "#df8e1d",
+        "base.blue": "#1e66f5",
+        "base.magenta": "#ea76cb",
+        "base.cyan": "#179299",
+        "caret": "#dc8a78",
+        "selection": "#ccd0da"
+      }
+    }
+  ]
+}

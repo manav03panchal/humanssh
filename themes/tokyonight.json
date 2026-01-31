@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/longbridgeapp/gpui-component/main/crates/story/themes/schema.json",
+  "name": "Tokyo Night",
+  "author": "Folke Lemaitre",
+  "themes": [
+    {
+      "name": "Tokyo Night",
+      "mode": "dark",
+      "colors": {
+        "background": "#1a1b26",
+        "foreground": "#c0caf5",
+        "border": "#3b4261",
+        "accent.background": "#7aa2f7",
+        "accent.foreground": "#1a1b26",
+        "primary.background": "#7aa2f7",
+        "primary.foreground": "#1a1b26",
+        "secondary.background": "#3b4261",
+        "secondary.foreground": "#c0caf5",
+        "muted.foreground": "#565f89",
+        "title_bar.background": "#16161e",
+        "tab.active.background": "#3b4261",
+        "tab.inactive.background": "#1a1b26",
+        "panel.background": "#16161e",
+        "list.active.background": "#3b4261",
+        "list.hover.background": "#292e42",
+        "base.red": "#f7768e",
+        "base.green": "#9ece6a",
+        "base.yellow": "#e0af68",
+        "base.blue": "#7aa2f7",
+        "base.magenta": "#bb9af7",
+        "base.cyan": "#7dcfff",
+        "caret": "#c0caf5",
+        "selection": "#3b4261"
+      }
+    },
+    {
+      "name": "Tokyo Night Storm",
+      "mode": "dark",
+      "colors": {
+        "background": "#24283b",
+        "foreground": "#c0caf5",
+        "border": "#3b4261",
+        "accent.background": "#7aa2f7",
+        "accent.foreground": "#24283b",
+        "primary.background": "#7aa2f7",
+        "primary.foreground": "#24283b",
+        "secondary.background": "#3b4261",
+        "secondary.foreground": "#c0caf5",
+        "muted.foreground": "#565f89",
+        "title_bar.background": "#1f2335",
+        "tab.active.background": "#3b4261",
+        "tab.inactive.background": "#24283b",
+        "panel.background": "#1f2335",
+        "list.active.background": "#3b4261",
+        "list.hover.background": "#292e42",
+        "base.red": "#f7768e",
+        "base.green": "#9ece6a",
+        "base.yellow": "#e0af68",
+        "base.blue": "#7aa2f7",
+        "base.magenta": "#bb9af7",
+        "base.cyan": "#7dcfff",
+        "caret": "#c0caf5",
+        "selection": "#3b4261"
+      }
+    }
+  ]
+}

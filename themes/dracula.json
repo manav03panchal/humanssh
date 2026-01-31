@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/longbridgeapp/gpui-component/main/crates/story/themes/schema.json",
+  "name": "Dracula",
+  "author": "Zeno Rocha",
+  "themes": [
+    {
+      "name": "Dracula",
+      "mode": "dark",
+      "colors": {
+        "background": "#282a36",
+        "foreground": "#f8f8f2",
+        "border": "#44475a",
+        "accent.background": "#bd93f9",
+        "accent.foreground": "#282a36",
+        "primary.background": "#bd93f9",
+        "primary.foreground": "#282a36",
+        "secondary.background": "#44475a",
+        "secondary.foreground": "#f8f8f2",
+        "muted.foreground": "#6272a4",
+        "title_bar.background": "#21222c",
+        "tab.active.background": "#44475a",
+        "tab.inactive.background": "#282a36",
+        "panel.background": "#21222c",
+        "list.active.background": "#44475a",
+        "list.hover.background": "#343746",
+        "base.red": "#ff5555",
+        "base.green": "#50fa7b",
+        "base.yellow": "#f1fa8c",
+        "base.blue": "#6272a4",
+        "base.magenta": "#ff79c6",
+        "base.cyan": "#8be9fd",
+        "caret": "#f8f8f2",
+        "selection": "#44475a"
+      }
+    }
+  ]
+}
