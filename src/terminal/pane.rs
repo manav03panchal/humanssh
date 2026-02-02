@@ -16,6 +16,7 @@ use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use gpui::*;
+use parking_lot::Mutex as ParkingMutex;
 use std::sync::{Arc, Mutex};
 
 // Font configuration
@@ -25,8 +26,32 @@ const MAX_FONT_SIZE: f32 = 32.0;
 const FONT_FAMILY: &str = "Iosevka Nerd Font";
 const PADDING: f32 = 2.0;
 
-/// Calculate cell dimensions from actual font metrics
+/// Cache for cell dimensions to avoid recalculating every frame.
+/// Key is font_size (as bits), value is (width, height).
+static CELL_DIMS_CACHE: ParkingMutex<Option<(u32, f32, f32)>> = ParkingMutex::new(None);
+
+/// Calculate cell dimensions from actual font metrics (cached).
 fn get_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
+    let font_size_bits = font_size.to_bits();
+
+    // Fast path: return cached value if font size matches
+    {
+        let cache = CELL_DIMS_CACHE.lock();
+        if let Some((cached_size, width, height)) = *cache {
+            if cached_size == font_size_bits {
+                return (width, height);
+            }
+        }
+    }
+
+    // Slow path: calculate and cache
+    let (width, height) = calculate_cell_dimensions(window, font_size);
+    *CELL_DIMS_CACHE.lock() = Some((font_size_bits, width, height));
+    (width, height)
+}
+
+/// Actually calculate cell dimensions from font metrics.
+fn calculate_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
     let font = Font {
         family: FONT_FAMILY.into(),
         features: FontFeatures::default(),
@@ -1175,7 +1200,14 @@ impl Render for TerminalPane {
                             // Resize PTY
                             if let Ok(pty_guard) = pty.lock() {
                                 if let Some(ref pty_inner) = *pty_guard {
-                                    let _ = pty_inner.resize(new_rows, new_cols);
+                                    if let Err(e) = pty_inner.resize(new_rows, new_cols) {
+                                        tracing::error!(
+                                            "Failed to resize PTY to {}x{}: {}",
+                                            new_cols,
+                                            new_rows,
+                                            e
+                                        );
+                                    }
                                 }
                             }
 

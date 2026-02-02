@@ -78,7 +78,7 @@ pub fn init(cx: &mut App) {
         tracing::info!("Loading themes from: {:?}", themes_dir);
 
         let saved_theme_clone = saved_theme.clone();
-        let _ = ThemeRegistry::watch_dir(themes_dir, cx, move |cx| {
+        if let Err(e) = ThemeRegistry::watch_dir(themes_dir, cx, move |cx| {
             // Apply saved theme when themes are loaded
             if let Some(theme) = ThemeRegistry::global(cx)
                 .themes()
@@ -95,7 +95,9 @@ pub fn init(cx: &mut App) {
                 Theme::global_mut(cx).apply_config(&theme);
                 tracing::info!("Applied default theme: Catppuccin Mocha");
             }
-        });
+        }) {
+            tracing::warn!("Failed to watch themes directory: {}", e);
+        }
     } else {
         tracing::warn!("Themes directory not found, using default theme");
     }

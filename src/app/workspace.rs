@@ -56,6 +56,12 @@ pub struct Workspace {
     pending_action: Option<PendingAction>,
     /// Process name for confirmation dialog
     pending_process_name: Option<String>,
+    /// Last time we checked for exited panes (debounce)
+    last_cleanup: std::time::Instant,
+    /// Cached tab titles to avoid recomputing every frame
+    cached_titles: Vec<SharedString>,
+    /// Last time we updated tab titles
+    last_title_update: std::time::Instant,
 }
 
 impl Workspace {
@@ -76,7 +82,27 @@ impl Workspace {
             active_tab: 0,
             pending_action: None,
             pending_process_name: None,
+            last_cleanup: std::time::Instant::now(),
+            cached_titles: vec!["Terminal 1".into()],
+            last_title_update: std::time::Instant::now(),
         }
+    }
+
+    /// Get tab titles, using cache if fresh enough (200ms TTL)
+    fn get_tab_titles(&mut self, cx: &App) -> Vec<SharedString> {
+        const TITLE_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(200);
+
+        // Return cached if fresh and tab count matches
+        if self.last_title_update.elapsed() < TITLE_CACHE_TTL
+            && self.cached_titles.len() == self.tabs.len()
+        {
+            return self.cached_titles.clone();
+        }
+
+        // Refresh cache
+        self.cached_titles = self.tabs.iter().map(|t| t.display_title(cx)).collect();
+        self.last_title_update = std::time::Instant::now();
+        self.cached_titles.clone()
     }
 
     /// Check if a tab has any running child processes
@@ -532,9 +558,18 @@ fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoEleme
         )
 }
 
+/// Interval between cleanup checks (500ms)
+const CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 impl Workspace {
-    /// Check for and clean up exited panes
+    /// Check for and clean up exited panes (debounced to avoid running every frame)
     fn cleanup_exited_panes(&mut self, cx: &mut Context<Self>) {
+        // Debounce: only run cleanup every CLEANUP_INTERVAL
+        if self.last_cleanup.elapsed() < CLEANUP_INTERVAL {
+            return;
+        }
+        self.last_cleanup = std::time::Instant::now();
+
         let mut tabs_to_remove: Vec<usize> = Vec::new();
 
         for (tab_idx, tab) in self.tabs.iter_mut().enumerate() {
@@ -606,7 +641,7 @@ impl Render for Workspace {
         let tab_count = self.tabs.len();
 
         // Pre-compute tab titles (dynamic from terminal or fallback)
-        let tab_titles: Vec<SharedString> = self.tabs.iter().map(|t| t.display_title(cx)).collect();
+        let tab_titles = self.get_tab_titles(cx);
 
         div()
             .size_full()
