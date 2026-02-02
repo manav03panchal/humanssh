@@ -1,8 +1,20 @@
 //! Theme system for HumanSSH.
 //!
 //! Wraps gpui_component's theme system and provides terminal color mapping.
+//!
+//! # Usage
+//!
+//! ```ignore
+//! // Get terminal colors for rendering
+//! let colors = terminal_colors(cx);
+//! let bg = colors.background;
+//! let fg = colors.foreground;
+//!
+//! // Switch theme via action
+//! cx.dispatch_action(Box::new(SwitchTheme("Catppuccin Latte".into())));
+//! ```
 
-use gpui::*;
+use gpui::{rgb, App, Hsla, SharedString};
 use gpui_component::theme::{Theme, ThemeMode, ThemeRegistry};
 use gpui_component::{ActiveTheme, Colorize};
 use parking_lot::Mutex;
@@ -50,7 +62,10 @@ fn save_settings(settings: &Settings) {
 pub fn init(cx: &mut App) {
     // Load saved settings
     let saved_settings = load_settings();
-    let saved_theme = saved_settings.theme.clone().unwrap_or_else(|| "Catppuccin Mocha".to_string());
+    let saved_theme = saved_settings
+        .theme
+        .clone()
+        .unwrap_or_else(|| "Catppuccin Mocha".to_string());
     let saved_font = saved_settings.font_family.clone();
 
     // Apply saved font family if present
@@ -112,11 +127,7 @@ pub fn init(cx: &mut App) {
 
     // Register theme switching actions
     cx.on_action(|action: &SwitchTheme, cx| {
-        if let Some(theme_config) = ThemeRegistry::global(cx)
-            .themes()
-            .get(&action.0)
-            .cloned()
-        {
+        if let Some(theme_config) = ThemeRegistry::global(cx).themes().get(&action.0).cloned() {
             Theme::global_mut(cx).apply_config(&theme_config);
             tracing::info!("Switched to theme: {}", action.0);
         }

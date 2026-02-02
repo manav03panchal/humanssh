@@ -1,4 +1,36 @@
 //! Pane group for split pane layouts.
+//!
+//! This module provides a tree-based layout system for terminal panes.
+//! Panes can be split horizontally or vertically, creating a binary tree
+//! where leaves are terminals and internal nodes are splits.
+//!
+//! # Structure
+//!
+//! ```text
+//! Split (Horizontal)
+//! ├── Leaf (Terminal 1)
+//! └── Split (Vertical)
+//!     ├── Leaf (Terminal 2)
+//!     └── Leaf (Terminal 3)
+//! ```
+//!
+//! # Usage
+//!
+//! ```ignore
+//! // Create a new pane with a terminal
+//! let terminal = cx.new(TerminalPane::new);
+//! let mut panes = PaneNode::new_leaf(terminal);
+//! let first_id = panes.first_leaf_id();
+//!
+//! // Split the pane vertically
+//! let new_terminal = cx.new(TerminalPane::new);
+//! if let Some(new_id) = panes.split(first_id, SplitDirection::Vertical, new_terminal) {
+//!     // new_id is the UUID of the newly created pane
+//! }
+//!
+//! // Find and remove a pane
+//! panes.remove(new_id);
+//! ```
 
 use crate::terminal::TerminalPane;
 use crate::theme::terminal_colors;
@@ -6,10 +38,12 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 
-/// Direction of a split
+/// Direction of a split between two panes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SplitDirection {
+    /// Side-by-side (left | right)
     Horizontal,
+    /// Stacked (top / bottom)
     Vertical,
 }
 
@@ -30,6 +64,9 @@ pub enum PaneNode {
 }
 
 impl PaneNode {
+    /// Creates a new leaf node containing a terminal pane.
+    ///
+    /// Each leaf is assigned a unique UUID for identification.
     pub fn new_leaf(terminal: Entity<TerminalPane>) -> Self {
         Self::Leaf {
             id: Uuid::new_v4(),
@@ -37,8 +74,18 @@ impl PaneNode {
         }
     }
 
-    /// Find a pane by ID and split it, returns the new pane's ID if successful
-    pub fn split(&mut self, target_id: Uuid, direction: SplitDirection, new_terminal: Entity<TerminalPane>) -> Option<Uuid> {
+    /// Splits a pane into two, creating a new terminal in the second slot.
+    ///
+    /// Searches the tree for a pane matching `target_id`, then replaces it
+    /// with a split node containing the original pane and the new terminal.
+    ///
+    /// Returns the UUID of the newly created pane, or `None` if the target wasn't found.
+    pub fn split(
+        &mut self,
+        target_id: Uuid,
+        direction: SplitDirection,
+        new_terminal: Entity<TerminalPane>,
+    ) -> Option<Uuid> {
         match self {
             PaneNode::Leaf { id, terminal } => {
                 if *id == target_id {
@@ -63,14 +110,15 @@ impl PaneNode {
                     None
                 }
             }
-            PaneNode::Split { first, second, .. } => {
-                first.split(target_id, direction, new_terminal.clone())
-                    .or_else(|| second.split(target_id, direction, new_terminal))
-            }
+            PaneNode::Split { first, second, .. } => first
+                .split(target_id, direction, new_terminal.clone())
+                .or_else(|| second.split(target_id, direction, new_terminal)),
         }
     }
 
-    /// Get the first leaf's ID (for focus)
+    /// Returns the UUID of the first (leftmost/topmost) leaf in the tree.
+    ///
+    /// Useful for setting initial focus when a tab is created or switched to.
     pub fn first_leaf_id(&self) -> Uuid {
         match self {
             PaneNode::Leaf { id, .. } => *id,
@@ -78,7 +126,9 @@ impl PaneNode {
         }
     }
 
-    /// Get all leaf terminal entities
+    /// Collects all terminal panes in the tree with their UUIDs.
+    ///
+    /// Returns a flat list of (id, terminal) pairs by traversing all leaves.
     pub fn all_terminals(&self) -> Vec<(Uuid, Entity<TerminalPane>)> {
         match self {
             PaneNode::Leaf { id, terminal } => vec![(*id, terminal.clone())],
@@ -90,7 +140,9 @@ impl PaneNode {
         }
     }
 
-    /// Find a terminal by ID
+    /// Finds a terminal pane by its UUID.
+    ///
+    /// Searches the tree recursively and returns the terminal entity if found.
     pub fn find_terminal(&self, target_id: Uuid) -> Option<Entity<TerminalPane>> {
         match self {
             PaneNode::Leaf { id, terminal } => {
@@ -100,13 +152,16 @@ impl PaneNode {
                     None
                 }
             }
-            PaneNode::Split { first, second, .. } => {
-                first.find_terminal(target_id).or_else(|| second.find_terminal(target_id))
-            }
+            PaneNode::Split { first, second, .. } => first
+                .find_terminal(target_id)
+                .or_else(|| second.find_terminal(target_id)),
         }
     }
 
-    /// Remove a pane by ID, returning true if removed
+    /// Removes a pane from the tree by its UUID.
+    ///
+    /// When a leaf is removed, its parent split is replaced by the remaining sibling,
+    /// effectively "promoting" it up the tree. Returns the removed node if found.
     pub fn remove(&mut self, target_id: Uuid) -> Option<PaneNode> {
         // First check what action to take without borrowing mutably
         let action = match self {
@@ -156,8 +211,16 @@ impl PaneNode {
         }
     }
 
-    /// Render the pane tree
-    pub fn render(&self, active_pane: Uuid, _window: &mut Window, cx: &mut Context<'_, super::workspace::Workspace>) -> AnyElement {
+    /// Renders the pane tree as a GPUI element.
+    ///
+    /// Recursively builds nested flex containers for splits and terminal views for leaves.
+    /// The active pane is highlighted with an accent border.
+    pub fn render(
+        &self,
+        active_pane: Uuid,
+        _window: &mut Window,
+        cx: &mut Context<'_, super::workspace::Workspace>,
+    ) -> AnyElement {
         // Get theme colors
         let colors = terminal_colors(cx);
         let accent = colors.accent;
@@ -181,66 +244,36 @@ impl PaneNode {
                     .child(terminal.clone())
                     .into_any_element()
             }
-            PaneNode::Split { direction, first, second, ratio } => {
+            PaneNode::Split {
+                direction,
+                first,
+                second,
+                ratio,
+            } => {
                 let ratio = *ratio;
 
                 let first_elem = first.render(active_pane, _window, cx);
                 let second_elem = second.render(active_pane, _window, cx);
 
                 match direction {
-                    SplitDirection::Horizontal => {
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_row()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(ratio))
-                                    .child(first_elem)
-                            )
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(px(2.0))
-                                    .bg(border)
-                            )
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(1.0 - ratio))
-                                    .child(second_elem)
-                            )
-                            .into_any_element()
-                    }
-                    SplitDirection::Vertical => {
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(relative(ratio))
-                                    .child(first_elem)
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(2.0))
-                                    .bg(border)
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(relative(1.0 - ratio))
-                                    .child(second_elem)
-                            )
-                            .into_any_element()
-                    }
+                    SplitDirection::Horizontal => div()
+                        .size_full()
+                        .flex()
+                        .flex_row()
+                        .child(div().h_full().w(relative(ratio)).child(first_elem))
+                        .child(div().h_full().w(px(2.0)).bg(border))
+                        .child(div().h_full().w(relative(1.0 - ratio)).child(second_elem))
+                        .into_any_element(),
+                    SplitDirection::Vertical => div()
+                        .size_full()
+                        .flex()
+                        .flex_col()
+                        .child(div().w_full().h(relative(ratio)).child(first_elem))
+                        .child(div().w_full().h(px(2.0)).bg(border))
+                        .child(div().w_full().h(relative(1.0 - ratio)).child(second_elem))
+                        .into_any_element(),
                 }
             }
         }
     }
 }
-

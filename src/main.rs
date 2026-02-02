@@ -5,8 +5,8 @@
 use anyhow::{Context, Result};
 use gpui::*;
 use gpui_component_assets::Assets;
-use humanssh::app::Workspace;
 use humanssh::actions::Quit;
+use humanssh::app::Workspace;
 use humanssh::theme;
 use once_cell::sync::Lazy;
 use std::time::Instant;
@@ -40,10 +40,10 @@ fn init_paths() -> Result<()> {
 
 /// Initialize the logging system.
 fn init_logging() {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("humanssh=info,warn"));
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("humanssh=info,warn"));
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(true).with_line_number(true))
@@ -86,7 +86,7 @@ fn open_main_window(cx: &mut App) -> Result<()> {
 
 /// Register keybindings.
 fn register_keybindings(cx: &mut App) {
-    use humanssh::actions::{OpenSettings, CloseTab};
+    use humanssh::actions::{CloseTab, OpenSettings};
 
     // Note: Quit action is handled by Workspace.request_quit() for confirmation
     // The global handler is a fallback that shouldn't normally trigger

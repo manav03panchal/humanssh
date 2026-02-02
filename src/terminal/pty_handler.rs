@@ -45,10 +45,16 @@ impl PtyHandler {
             .context("Failed to spawn shell")?;
 
         // Get writer for sending input to PTY
-        let writer = pair.master.take_writer().context("Failed to get PTY writer")?;
+        let writer = pair
+            .master
+            .take_writer()
+            .context("Failed to get PTY writer")?;
 
         // Get reader for receiving output from PTY
-        let mut reader = pair.master.try_clone_reader().context("Failed to get PTY reader")?;
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .context("Failed to get PTY reader")?;
 
         // Channel for output bytes
         let (output_tx, output_rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();

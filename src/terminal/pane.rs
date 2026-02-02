@@ -47,7 +47,9 @@ fn get_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
     }];
 
     // Shape a single 'M' character (full-width in monospace)
-    let shaped = window.text_system().shape_line("M".into(), font_size_px, &runs, None);
+    let shaped = window
+        .text_system()
+        .shape_line("M".into(), font_size_px, &runs, None);
     let cell_width = shaped.width.into();
 
     // Use ascent + descent + some line spacing for cell height
@@ -137,12 +139,19 @@ impl Dimensions for TermSize {
     }
 }
 
-/// Terminal pane that renders a PTY session
+/// Terminal pane that renders a PTY session.
+///
+/// Manages the PTY process, terminal emulator state, and rendering.
 pub struct TerminalPane {
+    /// PTY process handler for shell communication
     pty: Arc<Mutex<Option<PtyHandler>>>,
+    /// Terminal emulator state (screen buffer, cursor, etc.)
     term: Arc<Mutex<Term<Listener>>>,
+    /// VTE parser for processing escape sequences
     processor: Arc<Mutex<Processor>>,
+    /// Event listener for terminal events (title changes, etc.)
     listener: Listener,
+    /// Terminal dimensions in rows/columns
     size: Arc<Mutex<TermSize>>,
     /// Cell dimensions (width, height) - calculated from font metrics
     cell_dims: Arc<Mutex<(f32, f32)>>,
@@ -152,6 +161,7 @@ pub struct TerminalPane {
     font_size: Arc<Mutex<f32>>,
     /// Whether we're currently dragging a selection
     dragging: bool,
+    /// Focus handle for keyboard input routing
     pub focus_handle: FocusHandle,
 }
 
@@ -200,35 +210,33 @@ impl TerminalPane {
         let processor_clone = pane.processor.clone();
 
         let pty_clone = pane.pty.clone();
-        cx.spawn(async move |this, cx| {
-            loop {
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
-                    .await;
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(16))
+                .await;
 
-                let should_notify = {
-                    let pty_guard = pty_clone.lock().unwrap();
-                    if let Some(ref pty) = *pty_guard {
-                        let output_chunks = pty.read_output();
-                        drop(pty_guard);
-                        if !output_chunks.is_empty() {
-                            let mut term = term_clone.lock().unwrap();
-                            let mut processor = processor_clone.lock().unwrap();
-                            for chunk in output_chunks {
-                                processor.advance(&mut *term, &chunk);
-                            }
-                            true
-                        } else {
-                            false
+            let should_notify = {
+                let pty_guard = pty_clone.lock().unwrap();
+                if let Some(ref pty) = *pty_guard {
+                    let output_chunks = pty.read_output();
+                    drop(pty_guard);
+                    if !output_chunks.is_empty() {
+                        let mut term = term_clone.lock().unwrap();
+                        let mut processor = processor_clone.lock().unwrap();
+                        for chunk in output_chunks {
+                            processor.advance(&mut *term, &chunk);
                         }
+                        true
                     } else {
                         false
                     }
-                };
-
-                if should_notify {
-                    let _ = this.update(cx, |_, cx| cx.notify());
+                } else {
+                    false
                 }
+            };
+
+            if should_notify {
+                let _ = this.update(cx, |_, cx| cx.notify());
             }
         })
         .detach();
@@ -276,8 +284,13 @@ impl TerminalPane {
     }
 
     /// Get the terminal title (set by OSC escape sequences)
-    pub fn title(&self) -> Option<String> {
-        self.listener.title.lock().unwrap().clone()
+    pub fn title(&self) -> Option<SharedString> {
+        self.listener
+            .title
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|s| s.clone().into())
     }
 
     /// Convert pixel position (window coords) to terminal cell coordinates
@@ -302,11 +315,7 @@ impl TerminalPane {
         let cell_y = ((local_y - PADDING) / cell_height).floor() as i32;
 
         let size = self.size.lock().unwrap();
-        if cell_x >= 0
-            && cell_y >= 0
-            && cell_x < size.cols as i32
-            && cell_y < size.rows as i32
-        {
+        if cell_x >= 0 && cell_y >= 0 && cell_x < size.cols as i32 && cell_y < size.rows as i32 {
             Some((cell_x as usize, cell_y as usize))
         } else {
             None
@@ -370,7 +379,12 @@ impl TerminalPane {
             *term.mode()
         };
 
-        if mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION | TermMode::MOUSE_MODE) {
+        if mode.intersects(
+            TermMode::MOUSE_REPORT_CLICK
+                | TermMode::MOUSE_DRAG
+                | TermMode::MOUSE_MOTION
+                | TermMode::MOUSE_MODE,
+        ) {
             // Send mouse release to PTY
             if mode.contains(TermMode::SGR_MOUSE) {
                 let button = match event.button {
@@ -431,7 +445,12 @@ impl TerminalPane {
         let (_, cell_height) = *self.cell_dims.lock().unwrap();
 
         // If mouse reporting is enabled, send wheel events
-        if mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION | TermMode::MOUSE_MODE) {
+        if mode.intersects(
+            TermMode::MOUSE_REPORT_CLICK
+                | TermMode::MOUSE_DRAG
+                | TermMode::MOUSE_MOTION
+                | TermMode::MOUSE_MODE,
+        ) {
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let button = if delta_y < 0.0 { 64 } else { 65 }; // 64 = wheel up, 65 = wheel down
 
@@ -798,34 +817,36 @@ fn apply_dim(color: Hsla) -> Hsla {
 /// Get bright variant of a named color
 fn get_bright_color(color: Color, term_colors: &TermColors, theme: &TerminalColors) -> Hsla {
     match color {
-        Color::Named(NamedColor::Black) => {
-            term_colors[NamedColor::BrightBlack].map(rgb_to_hsla).unwrap_or(theme.bright_black)
-        }
-        Color::Named(NamedColor::Red) => {
-            term_colors[NamedColor::BrightRed].map(rgb_to_hsla).unwrap_or(theme.bright_red)
-        }
-        Color::Named(NamedColor::Green) => {
-            term_colors[NamedColor::BrightGreen].map(rgb_to_hsla).unwrap_or(theme.bright_green)
-        }
-        Color::Named(NamedColor::Yellow) => {
-            term_colors[NamedColor::BrightYellow].map(rgb_to_hsla).unwrap_or(theme.bright_yellow)
-        }
-        Color::Named(NamedColor::Blue) => {
-            term_colors[NamedColor::BrightBlue].map(rgb_to_hsla).unwrap_or(theme.bright_blue)
-        }
-        Color::Named(NamedColor::Magenta) => {
-            term_colors[NamedColor::BrightMagenta].map(rgb_to_hsla).unwrap_or(theme.bright_magenta)
-        }
-        Color::Named(NamedColor::Cyan) => {
-            term_colors[NamedColor::BrightCyan].map(rgb_to_hsla).unwrap_or(theme.bright_cyan)
-        }
-        Color::Named(NamedColor::White) => {
-            term_colors[NamedColor::BrightWhite].map(rgb_to_hsla).unwrap_or(theme.bright_white)
-        }
+        Color::Named(NamedColor::Black) => term_colors[NamedColor::BrightBlack]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_black),
+        Color::Named(NamedColor::Red) => term_colors[NamedColor::BrightRed]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_red),
+        Color::Named(NamedColor::Green) => term_colors[NamedColor::BrightGreen]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_green),
+        Color::Named(NamedColor::Yellow) => term_colors[NamedColor::BrightYellow]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_yellow),
+        Color::Named(NamedColor::Blue) => term_colors[NamedColor::BrightBlue]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_blue),
+        Color::Named(NamedColor::Magenta) => term_colors[NamedColor::BrightMagenta]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_magenta),
+        Color::Named(NamedColor::Cyan) => term_colors[NamedColor::BrightCyan]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_cyan),
+        Color::Named(NamedColor::White) => term_colors[NamedColor::BrightWhite]
+            .map(rgb_to_hsla)
+            .unwrap_or(theme.bright_white),
         Color::Indexed(idx) if idx < 8 => {
             // Convert 0-7 to bright variants (8-15)
             let bright_idx = idx + 8;
-            term_colors[bright_idx as usize].map(rgb_to_hsla).unwrap_or_else(|| indexed_color_to_hsla(bright_idx, theme))
+            term_colors[bright_idx as usize]
+                .map(rgb_to_hsla)
+                .unwrap_or_else(|| indexed_color_to_hsla(bright_idx, theme))
         }
         other => color_to_hsla(other, term_colors, theme),
     }
@@ -968,9 +989,9 @@ fn build_render_data(
 
         // Apply cursor styling for block cursor
         let is_cursor = cursor_info.is_some_and(|c| c.row == row && c.col == col);
-        let is_block_cursor = is_cursor && cursor_info.is_some_and(|c| {
-            matches!(c.shape, CursorShape::Block | CursorShape::HollowBlock)
-        });
+        let is_block_cursor = is_cursor
+            && cursor_info
+                .is_some_and(|c| matches!(c.shape, CursorShape::Block | CursorShape::HollowBlock));
         if is_block_cursor {
             fg = theme.background;
         }
@@ -1029,7 +1050,11 @@ fn build_render_data(
         }
     }
 
-    RenderData { cells, bg_regions, cursor: cursor_info }
+    RenderData {
+        cells,
+        bg_regions,
+        cursor: cursor_info,
+    }
 }
 
 impl Render for TerminalPane {
@@ -1073,24 +1098,42 @@ impl Render for TerminalPane {
             .on_click(cx.listener(|_this, _event: &ClickEvent, window, cx| {
                 window.focus(&cx.focus_handle());
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down(event, cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down(event, cx);
-            }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down(event, cx);
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                this.handle_mouse_up(event, cx);
-            }))
-            .on_mouse_up(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                this.handle_mouse_up(event, cx);
-            }))
-            .on_mouse_up(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                this.handle_mouse_up(event, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.handle_mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.handle_mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.handle_mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_mouse_up(event, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_mouse_up(event, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_mouse_up(event, cx);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.handle_mouse_move(event, cx);
             }))
@@ -1114,8 +1157,10 @@ impl Render for TerminalPane {
                         let bounds_width: f32 = bounds.size.width.into();
                         let bounds_height: f32 = bounds.size.height.into();
 
-                        let new_cols = ((bounds_width - PADDING * 2.0).max(0.0) / cell_width).floor() as u16;
-                        let new_rows = ((bounds_height - PADDING * 2.0).max(0.0) / cell_height).floor() as u16;
+                        let new_cols =
+                            ((bounds_width - PADDING * 2.0).max(0.0) / cell_width).floor() as u16;
+                        let new_rows =
+                            ((bounds_height - PADDING * 2.0).max(0.0) / cell_height).floor() as u16;
                         let new_cols = new_cols.max(10);
                         let new_rows = new_rows.max(3);
 
@@ -1184,11 +1229,27 @@ impl Render for TerminalPane {
                             })
                             .collect();
 
-                        (render_data, shaped_cells, bounds, cell_width, cell_height, selection_range, cols)
+                        (
+                            render_data,
+                            shaped_cells,
+                            bounds,
+                            cell_width,
+                            cell_height,
+                            selection_range,
+                            cols,
+                        )
                     },
                     // Paint: draw backgrounds and individual cells at exact grid positions
                     move |_bounds, data, window, cx| {
-                        let (render_data, shaped_cells, bounds, cell_width, cell_height, selection_range, cols) = data;
+                        let (
+                            render_data,
+                            shaped_cells,
+                            bounds,
+                            cell_width,
+                            cell_height,
+                            selection_range,
+                            cols,
+                        ) = data;
 
                         let origin = bounds.origin;
                         let line_height = px(cell_height);
@@ -1227,10 +1288,13 @@ impl Render for TerminalPane {
                                     let end_col = sel.end.column.0;
 
                                     for row in start_row..=end_row {
-                                        let col_start = if row == start_row { start_col } else { 0 };
-                                        let col_end = if row == end_row { end_col + 1 } else { cols };
+                                        let col_start =
+                                            if row == start_row { start_col } else { 0 };
+                                        let col_end =
+                                            if row == end_row { end_col + 1 } else { cols };
 
-                                        let x = origin.x + px(PADDING + col_start as f32 * cell_width);
+                                        let x =
+                                            origin.x + px(PADDING + col_start as f32 * cell_width);
                                         let y = origin.y + px(PADDING + row as f32 * cell_height);
                                         let width = px((col_end - col_start) as f32 * cell_width);
                                         let height = px(cell_height);
@@ -1264,15 +1328,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Bottom
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x, cursor_y + px(cell_height) - thickness),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Point::new(
+                                                cursor_x,
+                                                cursor_y + px(cell_height) - thickness,
+                                            ),
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1280,15 +1353,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Right
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x + px(cell_width) - thickness, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Point::new(
+                                                cursor_x + px(cell_width) - thickness,
+                                                cursor_y,
+                                            ),
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1300,15 +1382,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Bottom
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x, cursor_y + px(cell_height) - thickness),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Point::new(
+                                                cursor_x,
+                                                cursor_y + px(cell_height) - thickness,
+                                            ),
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1316,15 +1407,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Right
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x + px(cell_width) - thickness, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Point::new(
+                                                cursor_x + px(cell_width) - thickness,
+                                                cursor_y,
+                                            ),
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1334,7 +1434,10 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: px(2.0), height: px(cell_height) },
+                                            Size {
+                                                width: px(2.0),
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1343,8 +1446,14 @@ impl Render for TerminalPane {
                                     // Thin horizontal bar at bottom
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x, cursor_y + px(cell_height) - px(2.0)),
-                                            Size { width: px(cell_width), height: px(2.0) },
+                                            Point::new(
+                                                cursor_x,
+                                                cursor_y + px(cell_height) - px(2.0),
+                                            ),
+                                            Size {
+                                                width: px(cell_width),
+                                                height: px(2.0),
+                                            },
                                         ),
                                         cursor.color,
                                     ));

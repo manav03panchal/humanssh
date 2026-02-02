@@ -1,11 +1,15 @@
 //! Main workspace - container for tabs and split panes.
 
 use super::pane_group::{PaneNode, SplitDirection};
-use crate::actions::{OpenSettings, CloseTab, Quit};
+use crate::actions::{CloseTab, OpenSettings, Quit};
 use crate::terminal::TerminalPane;
 use crate::theme::{terminal_colors, SwitchTheme};
 use gpui::prelude::FluentBuilder;
-use gpui::*;
+use gpui::{
+    div, hsla, px, App, AppContext, ClickEvent, Context, ElementId, FontWeight, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Window,
+};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::DropdownMenu;
 use gpui_component::theme::ThemeRegistry;
@@ -23,14 +27,14 @@ enum PendingAction {
 /// A single tab in the workspace
 struct Tab {
     id: Uuid,
-    fallback_title: String,
+    fallback_title: SharedString,
     panes: PaneNode,
     active_pane: Uuid,
 }
 
 impl Tab {
     /// Get the display title for this tab (dynamic from terminal or fallback)
-    fn display_title(&self, cx: &App) -> String {
+    fn display_title(&self, cx: &App) -> SharedString {
         // Try to get dynamic title from the active pane's terminal
         if let Some(terminal) = self.panes.find_terminal(self.active_pane) {
             if let Some(title) = terminal.read(cx).title() {
@@ -44,7 +48,9 @@ impl Tab {
 
 /// The main workspace view containing the tab bar and terminal panes.
 pub struct Workspace {
+    /// All open tabs, each containing a pane tree
     tabs: Vec<Tab>,
+    /// Index of the currently active tab
     active_tab: usize,
     /// Pending action requiring confirmation (shows dialog)
     pending_action: Option<PendingAction>,
@@ -60,7 +66,7 @@ impl Workspace {
 
         let tab = Tab {
             id: Uuid::new_v4(),
-            fallback_title: "Terminal 1".to_string(),
+            fallback_title: "Terminal 1".into(),
             panes,
             active_pane,
         };
@@ -166,7 +172,7 @@ impl Workspace {
 
         let tab = Tab {
             id: Uuid::new_v4(),
-            fallback_title: format!("Terminal {}", tab_num),
+            fallback_title: format!("Terminal {}", tab_num).into(),
             panes,
             active_pane,
         };
@@ -215,10 +221,18 @@ impl Workspace {
     }
 
     /// Split the active pane
-    fn split_pane(&mut self, direction: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
+    fn split_pane(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let new_terminal = cx.new(TerminalPane::new);
-            if let Some(new_pane_id) = tab.panes.split(tab.active_pane, direction, new_terminal.clone()) {
+            if let Some(new_pane_id) =
+                tab.panes
+                    .split(tab.active_pane, direction, new_terminal.clone())
+            {
                 // Set the new pane as active
                 tab.active_pane = new_pane_id;
                 // Focus the new terminal
@@ -287,11 +301,8 @@ impl Workspace {
                 for theme in themes {
                     let name = theme.name.clone();
                     let is_current = current == name;
-                    menu = menu.menu_with_check(
-                        name.clone(),
-                        is_current,
-                        Box::new(SwitchTheme(name)),
-                    );
+                    menu =
+                        menu.menu_with_check(name.clone(), is_current, Box::new(SwitchTheme(name)));
                 }
 
                 menu
@@ -401,7 +412,6 @@ impl Workspace {
                     ),
             )
     }
-
 }
 
 /// Toggle the settings dialog (can be called from anywhere)
@@ -425,9 +435,9 @@ pub fn open_settings_dialog(window: &mut Window, cx: &mut App) {
 /// Render settings dialog content (standalone version for open_settings_dialog)
 fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
     use crate::theme::{SwitchFont, SwitchTheme};
+    use gpui_component::button::Button;
     use gpui_component::theme::ThemeRegistry;
     use gpui_component::{v_flex, ActiveTheme, StyledExt};
-    use gpui_component::button::Button;
 
     let current_theme = cx.theme().theme_name().clone();
     let current_font = cx.theme().font_family.to_string();
@@ -596,7 +606,7 @@ impl Render for Workspace {
         let tab_count = self.tabs.len();
 
         // Pre-compute tab titles (dynamic from terminal or fallback)
-        let tab_titles: Vec<String> = self.tabs.iter().map(|t| t.display_title(cx)).collect();
+        let tab_titles: Vec<SharedString> = self.tabs.iter().map(|t| t.display_title(cx)).collect();
 
         div()
             .size_full()
