@@ -2,6 +2,7 @@
 
 use super::pane_group::{PaneNode, SplitDirection};
 use crate::actions::{CloseTab, OpenSettings, Quit};
+use crate::config::timing;
 use crate::terminal::TerminalPane;
 use crate::theme::{terminal_colors, SwitchTheme};
 use gpui::prelude::FluentBuilder;
@@ -62,6 +63,8 @@ pub struct Workspace {
     cached_titles: Vec<SharedString>,
     /// Last time we updated tab titles
     last_title_update: std::time::Instant,
+    /// Last saved window bounds (for change detection)
+    last_saved_bounds: Option<(f32, f32, f32, f32)>,
 }
 
 impl Workspace {
@@ -85,15 +88,43 @@ impl Workspace {
             last_cleanup: std::time::Instant::now(),
             cached_titles: vec!["Terminal 1".into()],
             last_title_update: std::time::Instant::now(),
+            last_saved_bounds: None,
         }
     }
 
-    /// Get tab titles, using cache if fresh enough (200ms TTL)
-    fn get_tab_titles(&mut self, cx: &App) -> Vec<SharedString> {
-        const TITLE_CACHE_TTL: std::time::Duration = std::time::Duration::from_millis(200);
+    /// Save window bounds if changed (called during render)
+    fn maybe_save_window_bounds(&mut self, window: &Window) {
+        let bounds = window.bounds();
+        let current: (f32, f32, f32, f32) = (
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+        );
 
+        // Only save if bounds changed
+        if self.last_saved_bounds != Some(current) {
+            self.last_saved_bounds = Some(current);
+            crate::theme::save_window_bounds(crate::theme::WindowBoundsConfig {
+                x: current.0,
+                y: current.1,
+                width: current.2,
+                height: current.3,
+            });
+            tracing::trace!(
+                x = current.0,
+                y = current.1,
+                w = current.2,
+                h = current.3,
+                "Saved window bounds"
+            );
+        }
+    }
+
+    /// Get tab titles, using cache if fresh enough
+    fn get_tab_titles(&mut self, cx: &App) -> Vec<SharedString> {
         // Return cached if fresh and tab count matches
-        if self.last_title_update.elapsed() < TITLE_CACHE_TTL
+        if self.last_title_update.elapsed() < timing::TITLE_CACHE_TTL
             && self.cached_titles.len() == self.tabs.len()
         {
             return self.cached_titles.clone();
@@ -558,14 +589,11 @@ fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoEleme
         )
 }
 
-/// Interval between cleanup checks (500ms)
-const CLEANUP_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
-
 impl Workspace {
     /// Check for and clean up exited panes (debounced to avoid running every frame)
     fn cleanup_exited_panes(&mut self, cx: &mut Context<Self>) {
         // Debounce: only run cleanup every CLEANUP_INTERVAL
-        if self.last_cleanup.elapsed() < CLEANUP_INTERVAL {
+        if self.last_cleanup.elapsed() < timing::CLEANUP_INTERVAL {
             return;
         }
         self.last_cleanup = std::time::Instant::now();
@@ -573,17 +601,19 @@ impl Workspace {
         let mut tabs_to_remove: Vec<usize> = Vec::new();
 
         for (tab_idx, tab) in self.tabs.iter_mut().enumerate() {
-            // Get all terminals and check for exited ones
+            // Phase 1: Collect all exited pane IDs (avoid TOCTOU race)
             let terminals = tab.panes.all_terminals();
             let total_panes = terminals.len();
-            let mut exited_count = 0;
+            let exited_pane_ids: Vec<uuid::Uuid> = terminals
+                .iter()
+                .filter(|(_, terminal)| terminal.read(cx).has_exited())
+                .map(|(id, _)| *id)
+                .collect();
+            let exited_count = exited_pane_ids.len();
 
-            for (pane_id, terminal) in &terminals {
-                if terminal.read(cx).has_exited() {
-                    exited_count += 1;
-                    // Try to remove (only works for non-root panes)
-                    tab.panes.remove(*pane_id);
-                }
+            // Phase 2: Remove all exited panes atomically
+            for pane_id in exited_pane_ids {
+                tab.panes.remove(pane_id);
             }
 
             // If all panes exited, mark tab for removal
@@ -616,6 +646,9 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Check for and close exited panes
         self.cleanup_exited_panes(cx);
+
+        // Save window bounds if changed
+        self.maybe_save_window_bounds(window);
 
         // Focus the active terminal in the active pane
         if let Some(tab) = self.tabs.get(self.active_tab) {

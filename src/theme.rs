@@ -24,11 +24,32 @@ use std::path::PathBuf;
 /// Cached terminal colors to avoid recomputation every frame
 static TERMINAL_COLORS_CACHE: Mutex<Option<(SharedString, TerminalColors)>> = Mutex::new(None);
 
+/// Window bounds for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowBoundsConfig {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl Default for WindowBoundsConfig {
+    fn default() -> Self {
+        Self {
+            x: 100.0,
+            y: 100.0,
+            width: 1200.0,
+            height: 800.0,
+        }
+    }
+}
+
 /// Settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Settings {
     theme: Option<String>,
     font_family: Option<String>,
+    window_bounds: Option<WindowBoundsConfig>,
 }
 
 /// Get the settings file path
@@ -52,10 +73,26 @@ fn load_settings() -> Settings {
 /// Save settings to disk
 fn save_settings(settings: &Settings) {
     if let Some(path) = settings_path() {
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
         if let Ok(json) = serde_json::to_string_pretty(settings) {
             let _ = std::fs::write(&path, json);
         }
     }
+}
+
+/// Load saved window bounds (public API for main.rs)
+pub fn load_window_bounds() -> WindowBoundsConfig {
+    load_settings().window_bounds.unwrap_or_default()
+}
+
+/// Save window bounds (public API for main.rs)
+pub fn save_window_bounds(bounds: WindowBoundsConfig) {
+    let mut settings = load_settings();
+    settings.window_bounds = Some(bounds);
+    save_settings(&settings);
 }
 
 /// Initialize theme watching and actions
@@ -118,10 +155,10 @@ pub fn init(cx: &mut App) {
 
         let font_family = cx.theme().font_family.to_string();
 
-        let settings = Settings {
-            theme: Some(theme_name.clone()),
-            font_family: Some(font_family.clone()),
-        };
+        // Preserve existing window bounds when saving theme/font
+        let mut settings = load_settings();
+        settings.theme = Some(theme_name.clone());
+        settings.font_family = Some(font_family.clone());
         save_settings(&settings);
         tracing::debug!("Saved settings: theme={}, font={}", theme_name, font_family);
     })

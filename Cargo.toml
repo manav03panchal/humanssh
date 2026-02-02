@@ -15,10 +15,6 @@ gpui-component-assets = "0.5"
 alacritty_terminal = "0.25"
 portable-pty = "0.8"
 
-# SSH - added in Checkpoint 5
-# russh = "0.46"
-# russh-keys = "0.46"
-
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"

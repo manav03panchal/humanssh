@@ -32,6 +32,20 @@ cargo build --release
 cargo run
 ```
 
+## Debug Mode
+
+Enable verbose logging with the `HUMANSSH_DEBUG` environment variable:
+
+```sh
+HUMANSSH_DEBUG=1 cargo run
+```
+
+For custom log levels, use `RUST_LOG`:
+
+```sh
+RUST_LOG=humanssh=trace cargo run
+```
+
 ## Development
 
 Set up git hooks for automated checks:

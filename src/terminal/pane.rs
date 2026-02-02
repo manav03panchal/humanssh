@@ -17,14 +17,13 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use gpui::*;
 use parking_lot::Mutex as ParkingMutex;
+use std::fmt::Write as FmtWrite;
 use std::sync::{Arc, Mutex};
 
-// Font configuration
-const DEFAULT_FONT_SIZE: f32 = 14.0;
-const MIN_FONT_SIZE: f32 = 8.0;
-const MAX_FONT_SIZE: f32 = 32.0;
-const FONT_FAMILY: &str = "Iosevka Nerd Font";
-const PADDING: f32 = 2.0;
+// Import centralized configuration
+use crate::config::terminal::{
+    DEFAULT_FONT_SIZE, FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, PADDING,
+};
 
 /// Cache for cell dimensions to avoid recalculating every frame.
 /// Key is font_size (as bits), value is (width, height).
@@ -90,6 +89,38 @@ struct BgRegion {
     col_start: usize,
     col_end: usize,
     color: Hsla,
+}
+
+/// Stack-allocated buffer for mouse escape sequences (avoids heap allocation).
+/// Max SGR sequence: `\x1b[<999;9999;9999M` = ~20 bytes, so 32 is plenty.
+struct MouseEscBuf {
+    buf: [u8; 32],
+    len: usize,
+}
+
+impl MouseEscBuf {
+    fn new() -> Self {
+        Self {
+            buf: [0; 32],
+            len: 0,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // Safety: we only write valid UTF-8 (ASCII escape sequences)
+        unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len]) }
+    }
+}
+
+impl std::fmt::Write for MouseEscBuf {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        let bytes = s.as_bytes();
+        let remaining = 32 - self.len;
+        let to_write = bytes.len().min(remaining);
+        self.buf[self.len..self.len + to_write].copy_from_slice(&bytes[..to_write]);
+        self.len += to_write;
+        Ok(())
+    }
 }
 
 /// Cursor rendering info
@@ -373,16 +404,16 @@ impl TerminalPane {
                 _ => return,
             };
 
-            let seq = if mode.contains(TermMode::SGR_MOUSE) {
-                format!("\x1b[<{};{};{}M", button, col + 1, row + 1)
+            let mut buf = MouseEscBuf::new();
+            if mode.contains(TermMode::SGR_MOUSE) {
+                let _ = write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1);
             } else {
                 let cb = (32 + button) as u8;
                 let cx_val = (32 + col + 1).min(255) as u8;
                 let cy = (32 + row + 1).min(255) as u8;
-                format!("\x1b[M{}{}{}", cb as char, cx_val as char, cy as char)
-            };
-
-            self.send_input(&seq);
+                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
+            }
+            self.send_input(buf.as_str());
         } else if event.button == MouseButton::Left {
             // Start text selection using alacritty's Selection
             let point = TermPoint::new(Line(row as i32), Column(col));
@@ -411,6 +442,7 @@ impl TerminalPane {
                 | TermMode::MOUSE_MODE,
         ) {
             // Send mouse release to PTY
+            let mut buf = MouseEscBuf::new();
             if mode.contains(TermMode::SGR_MOUSE) {
                 let button = match event.button {
                     MouseButton::Left => 0,
@@ -418,15 +450,14 @@ impl TerminalPane {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                let seq = format!("\x1b[<{};{};{}m", button, col + 1, row + 1);
-                self.send_input(&seq);
+                let _ = write!(buf, "\x1b[<{};{};{}m", button, col + 1, row + 1);
             } else {
                 let cb = (32 + 3) as u8;
                 let cx_val = (32 + col + 1).min(255) as u8;
                 let cy = (32 + row + 1).min(255) as u8;
-                let seq = format!("\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
-                self.send_input(&seq);
+                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
             }
+            self.send_input(buf.as_str());
         } else if event.button == MouseButton::Left {
             // End text selection
             if self.dragging {
@@ -479,16 +510,16 @@ impl TerminalPane {
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let button = if delta_y < 0.0 { 64 } else { 65 }; // 64 = wheel up, 65 = wheel down
 
-            let seq = if mode.contains(TermMode::SGR_MOUSE) {
-                format!("\x1b[<{};{};{}M", button, col + 1, row + 1)
+            let mut buf = MouseEscBuf::new();
+            if mode.contains(TermMode::SGR_MOUSE) {
+                let _ = write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1);
             } else {
                 let cb = (32 + button) as u8;
                 let cx = (32 + col + 1).min(255) as u8;
                 let cy = (32 + row + 1).min(255) as u8;
-                format!("\x1b[M{}{}{}", cb as char, cx as char, cy as char)
-            };
-
-            self.send_input(&seq);
+                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx as char, cy as char);
+            }
+            self.send_input(buf.as_str());
         } else if mode.contains(TermMode::ALT_SCREEN) {
             // In alternate screen without mouse mode, send arrow keys for scrolling
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
@@ -952,8 +983,9 @@ fn build_render_data(
     let mut cells: Vec<RenderCell> = Vec::new();
     let mut bg_regions: Vec<BgRegion> = Vec::new();
 
-    // Grid for tracking backgrounds (we need to process in order for region merging)
-    let mut grid_bg: Vec<Vec<Option<Hsla>>> = vec![vec![None; cols]; rows];
+    // Track current background region for on-the-fly merging (avoids grid allocation)
+    // (row, col_start, col_end, color)
+    let mut current_bg: Option<(usize, usize, usize, Hsla)> = None;
 
     // Get cursor info with shape
     let cursor_line = content.cursor.point.line.0;
@@ -1021,9 +1053,38 @@ fn build_render_data(
             fg = theme.background;
         }
 
-        // Track non-default backgrounds
+        // Merge non-default backgrounds on-the-fly
         if bg != default_bg {
-            grid_bg[row][col] = Some(bg);
+            match &mut current_bg {
+                Some((cur_row, _start, end, color))
+                    if *cur_row == row && *end == col && *color == bg =>
+                {
+                    // Extend current region
+                    *end = col + 1;
+                }
+                Some((cur_row, start, end, color)) => {
+                    // Flush current region, start new
+                    bg_regions.push(BgRegion {
+                        row: *cur_row,
+                        col_start: *start,
+                        col_end: *end,
+                        color: *color,
+                    });
+                    current_bg = Some((row, col, col + 1, bg));
+                }
+                None => {
+                    // Start new region
+                    current_bg = Some((row, col, col + 1, bg));
+                }
+            }
+        } else if let Some((cur_row, start, end, color)) = current_bg.take() {
+            // Non-default to default transition: flush region
+            bg_regions.push(BgRegion {
+                row: cur_row,
+                col_start: start,
+                col_end: end,
+                color,
+            });
         }
 
         // Only add non-space characters to render list
@@ -1038,41 +1099,14 @@ fn build_render_data(
         }
     }
 
-    // Build merged background regions from grid
-    for (row_idx, row) in grid_bg.into_iter().enumerate() {
-        let mut bg_start: Option<(usize, Hsla)> = None;
-
-        for (col_idx, bg_opt) in row.into_iter().enumerate() {
-            match (&mut bg_start, bg_opt) {
-                (None, Some(bg)) => {
-                    bg_start = Some((col_idx, bg));
-                }
-                (Some((_start, color)), Some(bg)) if *color == bg => {
-                    // Continue current region
-                }
-                (Some((start, color)), _) => {
-                    // Flush region
-                    bg_regions.push(BgRegion {
-                        row: row_idx,
-                        col_start: *start,
-                        col_end: col_idx,
-                        color: *color,
-                    });
-                    bg_start = bg_opt.map(|bg| (col_idx, bg));
-                }
-                (None, None) => {}
-            }
-        }
-
-        // Flush remaining bg region
-        if let Some((start, color)) = bg_start {
-            bg_regions.push(BgRegion {
-                row: row_idx,
-                col_start: start,
-                col_end: cols,
-                color,
-            });
-        }
+    // Flush any remaining background region
+    if let Some((row, col_start, col_end, color)) = current_bg {
+        bg_regions.push(BgRegion {
+            row,
+            col_start,
+            col_end,
+            color,
+        });
     }
 
     RenderData {
@@ -1088,6 +1122,8 @@ impl Render for TerminalPane {
 
         // Get theme colors
         let colors = terminal_colors(cx);
+        let size = *self.size.lock().unwrap();
+        tracing::trace!(rows = size.rows, cols = size.cols, "Terminal render");
         let bg_color = colors.background;
         let font_family: SharedString = FONT_FAMILY.into();
 
@@ -1261,6 +1297,9 @@ impl Render for TerminalPane {
                             })
                             .collect();
 
+                        // Use theme selection color with alpha for transparency
+                        let selection_color = colors_clone.selection;
+
                         (
                             render_data,
                             shaped_cells,
@@ -1269,6 +1308,7 @@ impl Render for TerminalPane {
                             cell_height,
                             selection_range,
                             cols,
+                            selection_color,
                         )
                     },
                     // Paint: draw backgrounds and individual cells at exact grid positions
@@ -1281,6 +1321,7 @@ impl Render for TerminalPane {
                             cell_height,
                             selection_range,
                             cols,
+                            selection_color,
                         ) = data;
 
                         let origin = bounds.origin;
@@ -1306,8 +1347,6 @@ impl Render for TerminalPane {
                                 && sel.start.column == sel.end.column;
 
                             if !start_same_as_end {
-                                let selection_color = hsla(210.0 / 360.0, 0.6, 0.5, 0.3);
-
                                 // SelectionRange uses viewport coordinates (line.0 >= 0 for visible lines)
                                 let start_line = sel.start.line.0;
                                 let end_line = sel.end.line.0;

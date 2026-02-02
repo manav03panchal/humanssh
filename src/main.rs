@@ -38,29 +38,50 @@ fn init_paths() -> Result<()> {
     Ok(())
 }
 
+/// Check if debug mode is enabled via environment variable.
+fn is_debug_mode() -> bool {
+    std::env::var("HUMANSSH_DEBUG").is_ok()
+}
+
 /// Initialize the logging system.
 fn init_logging() {
     use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+    // In debug mode, enable trace logging for humanssh
+    let default_filter = if is_debug_mode() {
+        "humanssh=trace,gpui=debug,info"
+    } else {
+        "humanssh=info,warn"
+    };
+
     let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("humanssh=info,warn"));
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(true).with_line_number(true))
         .with(filter)
         .init();
 
-    info!("HumanSSH v{} starting up", env!("CARGO_PKG_VERSION"));
+    if is_debug_mode() {
+        info!(
+            "HumanSSH v{} starting up (DEBUG MODE ENABLED)",
+            env!("CARGO_PKG_VERSION")
+        );
+        info!("Set RUST_LOG for custom log levels, e.g. RUST_LOG=humanssh=trace");
+    } else {
+        info!("HumanSSH v{} starting up", env!("CARGO_PKG_VERSION"));
+    }
 }
 
-/// Build window options.
+/// Build window options using saved bounds.
 fn build_window_options() -> WindowOptions {
+    let saved = theme::load_window_bounds();
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(100.0), px(100.0)),
+            origin: Point::new(px(saved.x), px(saved.y)),
             size: Size {
-                width: px(1200.0),
-                height: px(800.0),
+                width: px(saved.width),
+                height: px(saved.height),
             },
         })),
         titlebar: Some(TitlebarOptions {

@@ -131,50 +131,126 @@ impl PtyHandler {
         Ok(())
     }
 
-    /// Check if the shell has any running child processes
+    /// Check if the shell has any running child processes.
+    /// Uses /proc on Linux, pgrep fallback on macOS.
     pub fn has_running_processes(&self) -> bool {
-        // Get the shell's process ID
-        if let Some(pid) = self.child.process_id() {
-            // Use pgrep to check for child processes
-            if let Ok(output) = std::process::Command::new("pgrep")
-                .args(["-P", &pid.to_string()])
-                .output()
-            {
-                // If pgrep returns any output, there are child processes
-                return !output.stdout.is_empty();
-            }
-        }
-        false
-    }
+        let Some(pid) = self.child.process_id() else {
+            return false;
+        };
 
-    /// Get the name of any running foreground process (for display in confirmation)
-    pub fn get_running_process_name(&self) -> Option<String> {
-        if let Some(pid) = self.child.process_id() {
-            // Get child PIDs
-            if let Ok(output) = std::process::Command::new("pgrep")
-                .args(["-P", &pid.to_string()])
-                .output()
-            {
-                if !output.stdout.is_empty() {
-                    // Get the first child PID
-                    let child_pids = String::from_utf8_lossy(&output.stdout);
-                    if let Some(child_pid) = child_pids.lines().next() {
-                        // Get the process name using ps
-                        if let Ok(ps_output) = std::process::Command::new("ps")
-                            .args(["-p", child_pid, "-o", "comm="])
-                            .output()
-                        {
-                            let name = String::from_utf8_lossy(&ps_output.stdout)
-                                .trim()
-                                .to_string();
-                            if !name.is_empty() {
-                                return Some(name);
+        // Try /proc first (Linux)
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let Ok(name) = entry.file_name().into_string() else {
+                        continue;
+                    };
+                    // Check if it's a numeric directory (PID)
+                    if name.chars().all(|c| c.is_ascii_digit()) {
+                        let stat_path = entry.path().join("stat");
+                        if let Ok(stat) = std::fs::read_to_string(&stat_path) {
+                            // stat format: pid (comm) state ppid ...
+                            // Find ppid (4th field after the closing paren)
+                            if let Some(idx) = stat.rfind(')') {
+                                let rest = &stat[idx + 2..]; // skip ") "
+                                let fields: Vec<&str> = rest.split_whitespace().collect();
+                                if fields.len() >= 2 {
+                                    if let Ok(ppid) = fields[1].parse::<u32>() {
+                                        if ppid == pid {
+                                            return true;
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
+            return false;
         }
-        None
+
+        // macOS/BSD fallback using pgrep
+        #[cfg(not(target_os = "linux"))]
+        {
+            if let Ok(output) = std::process::Command::new("pgrep")
+                .args(["-P", &pid.to_string()])
+                .output()
+            {
+                return !output.stdout.is_empty();
+            }
+            false
+        }
+    }
+
+    /// Get the name of any running foreground process (for display in confirmation).
+    /// Uses /proc on Linux, ps fallback on macOS.
+    pub fn get_running_process_name(&self) -> Option<String> {
+        let pid = self.child.process_id()?;
+
+        // Try /proc first (Linux)
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(entries) = std::fs::read_dir("/proc") {
+                for entry in entries.flatten() {
+                    let Ok(name) = entry.file_name().into_string() else {
+                        continue;
+                    };
+                    if name.chars().all(|c| c.is_ascii_digit()) {
+                        let stat_path = entry.path().join("stat");
+                        if let Ok(stat) = std::fs::read_to_string(&stat_path) {
+                            if let Some(idx) = stat.rfind(')') {
+                                let rest = &stat[idx + 2..];
+                                let fields: Vec<&str> = rest.split_whitespace().collect();
+                                if fields.len() >= 2 {
+                                    if let Ok(ppid) = fields[1].parse::<u32>() {
+                                        if ppid == pid {
+                                            // Extract process name from (comm) in stat
+                                            if let (Some(start), Some(end)) =
+                                                (stat.find('('), stat.rfind(')'))
+                                            {
+                                                return Some(stat[start + 1..end].to_string());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+
+        // macOS/BSD fallback
+        #[cfg(not(target_os = "linux"))]
+        {
+            let output = std::process::Command::new("pgrep")
+                .args(["-P", &pid.to_string()])
+                .output()
+                .ok()?;
+
+            if output.stdout.is_empty() {
+                return None;
+            }
+
+            let child_pids = String::from_utf8_lossy(&output.stdout);
+            let child_pid = child_pids.lines().next()?;
+
+            let ps_output = std::process::Command::new("ps")
+                .args(["-p", child_pid, "-o", "comm="])
+                .output()
+                .ok()?;
+
+            let name = String::from_utf8_lossy(&ps_output.stdout)
+                .trim()
+                .to_string();
+
+            if name.is_empty() {
+                None
+            } else {
+                Some(name)
+            }
+        }
     }
 }
