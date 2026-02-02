@@ -921,37 +921,57 @@ fn shape_rows_batched(
                 row.sort_by_key(|c| c.col);
 
                 // Build the row string and runs
+                // CRITICAL: TextRun.len is in BYTES, and runs MUST cover all bytes in text
+                // Otherwise GPUI may skip rendering parts of the text
                 let mut text = String::with_capacity(cols);
                 let mut runs: Vec<TextRun> = Vec::new();
 
                 let mut current_col = 0;
                 for cell in row {
-                    // Fill gaps with spaces (same style as first cell or default)
-                    while current_col < cell.col {
-                        text.push(' ');
-                        current_col += 1;
+                    // Fill gaps with spaces - each space is 1 byte
+                    let gap = cell.col.saturating_sub(current_col);
+                    if gap > 0 {
+                        // Add spaces to text
+                        for _ in 0..gap {
+                            text.push(' ');
+                        }
+
+                        // MUST add spaces to a run so they get rendered
+                        // Use the upcoming cell's color so run can potentially merge
+                        runs.push(create_text_run(
+                            gap,
+                            font_family,
+                            cell.fg,
+                            CellFlags::empty(),
+                        ));
                     }
+
+                    current_col = cell.col;
 
                     // Add the cell character
                     let char_len = cell.c.len_utf8();
 
-                    // Check if we can extend the previous run (same style)
-                    let can_extend = runs
-                        .last()
-                        .is_some_and(|last_run| last_run.color == cell.fg);
+                    // Check if we can extend the previous run (same color AND flags)
+                    let can_extend = runs.last().is_some_and(|last_run| {
+                        last_run.color == cell.fg
+                            && last_run.font.weight
+                                == if cell.flags.contains(CellFlags::BOLD) {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                }
+                    });
 
                     if can_extend {
                         // Extend previous run
-                        if let Some(last_run) = runs.last_mut() {
-                            last_run.len += char_len;
-                        }
+                        runs.last_mut().unwrap().len += char_len;
                     } else {
-                        // Start new run
+                        // Start new run for this character
                         runs.push(create_text_run(char_len, font_family, cell.fg, cell.flags));
                     }
 
                     text.push(cell.c);
-                    current_col = cell.col + 1;
+                    current_col += 1;
                 }
 
                 // Handle empty text
