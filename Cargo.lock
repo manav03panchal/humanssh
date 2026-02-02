@@ -2631,6 +2631,8 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
+ "base64",
+ "dirs 5.0.1",
  "futures",
  "gpui",
  "gpui-component",

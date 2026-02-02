@@ -1,23 +1,55 @@
 //! Pane group for split pane layouts.
+//!
+//! This module provides a tree-based layout system for panes.
+//! Panes can be split horizontally or vertically, creating a binary tree
+//! where leaves are pane content and internal nodes are splits.
+//!
+//! # Structure
+//!
+//! ```text
+//! Split (Horizontal)
+//! ├── Leaf (Pane 1)
+//! └── Split (Vertical)
+//!     ├── Leaf (Pane 2)
+//!     └── Leaf (Pane 3)
+//! ```
+//!
+//! # Usage
+//!
+//! ```ignore
+//! // Create a new pane with a terminal
+//! let terminal = cx.new(TerminalPane::new);
+//! let mut panes = PaneNode::new_leaf(terminal.into());
+//! let first_id = panes.first_leaf_id();
+//!
+//! // Split the pane vertically
+//! let new_terminal = cx.new(TerminalPane::new);
+//! if let Some(new_id) = panes.split(first_id, SplitDirection::Vertical, new_terminal.into()) {
+//!     // new_id is the UUID of the newly created pane
+//! }
+//!
+//! // Find and remove a pane
+//! panes.remove(new_id);
+//! ```
 
-use crate::terminal::TerminalPane;
-use crate::theme::terminal_colors;
-use gpui::prelude::FluentBuilder;
-use gpui::*;
+use super::pane::PaneKind;
 use uuid::Uuid;
 
-/// Direction of a split
+/// Direction of a split between two panes.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SplitDirection {
+    /// Side-by-side (left | right)
     Horizontal,
+    /// Stacked (top / bottom)
     Vertical,
 }
 
-/// A pane group node - either a leaf (terminal) or a split (two children)
+/// A pane group node - either a leaf (pane content) or a split (two children)
+#[derive(Clone)]
 pub enum PaneNode {
     Leaf {
         id: Uuid,
-        terminal: Entity<TerminalPane>,
+        pane: PaneKind,
     },
     Split {
         direction: SplitDirection,
@@ -29,19 +61,32 @@ pub enum PaneNode {
 }
 
 impl PaneNode {
-    pub fn new_leaf(terminal: Entity<TerminalPane>) -> Self {
+    /// Creates a new leaf node containing a pane.
+    ///
+    /// Each leaf is assigned a unique UUID for identification.
+    pub fn new_leaf(pane: PaneKind) -> Self {
         Self::Leaf {
             id: Uuid::new_v4(),
-            terminal,
+            pane,
         }
     }
 
-    /// Find a pane by ID and split it, returns the new pane's ID if successful
-    pub fn split(&mut self, target_id: Uuid, direction: SplitDirection, new_terminal: Entity<TerminalPane>) -> Option<Uuid> {
+    /// Splits a pane into two, creating a new pane in the second slot.
+    ///
+    /// Searches the tree for a pane matching `target_id`, then replaces it
+    /// with a split node containing the original pane and the new pane.
+    ///
+    /// Returns the UUID of the newly created pane, or `None` if the target wasn't found.
+    pub fn split(
+        &mut self,
+        target_id: Uuid,
+        direction: SplitDirection,
+        new_pane: PaneKind,
+    ) -> Option<Uuid> {
         match self {
-            PaneNode::Leaf { id, terminal } => {
+            PaneNode::Leaf { id, pane } => {
                 if *id == target_id {
-                    let old_terminal = terminal.clone();
+                    let old_pane = pane.clone();
                     let old_id = *id;
                     let new_id = Uuid::new_v4();
 
@@ -49,11 +94,11 @@ impl PaneNode {
                         direction,
                         first: Box::new(PaneNode::Leaf {
                             id: old_id,
-                            terminal: old_terminal,
+                            pane: old_pane,
                         }),
                         second: Box::new(PaneNode::Leaf {
                             id: new_id,
-                            terminal: new_terminal,
+                            pane: new_pane,
                         }),
                         ratio: 0.5,
                     };
@@ -62,14 +107,15 @@ impl PaneNode {
                     None
                 }
             }
-            PaneNode::Split { first, second, .. } => {
-                first.split(target_id, direction, new_terminal.clone())
-                    .or_else(|| second.split(target_id, direction, new_terminal))
-            }
+            PaneNode::Split { first, second, .. } => first
+                .split(target_id, direction, new_pane.clone())
+                .or_else(|| second.split(target_id, direction, new_pane)),
         }
     }
 
-    /// Get the first leaf's ID (for focus)
+    /// Returns the UUID of the first (leftmost/topmost) leaf in the tree.
+    ///
+    /// Useful for setting initial focus when a tab is created or switched to.
     pub fn first_leaf_id(&self) -> Uuid {
         match self {
             PaneNode::Leaf { id, .. } => *id,
@@ -77,35 +123,42 @@ impl PaneNode {
         }
     }
 
-    /// Get all leaf terminal entities
-    pub fn all_terminals(&self) -> Vec<(Uuid, Entity<TerminalPane>)> {
+    /// Collects all panes in the tree with their UUIDs.
+    ///
+    /// Returns a flat list of (id, pane) pairs by traversing all leaves.
+    pub fn all_panes(&self) -> Vec<(Uuid, PaneKind)> {
         match self {
-            PaneNode::Leaf { id, terminal } => vec![(*id, terminal.clone())],
+            PaneNode::Leaf { id, pane } => vec![(*id, pane.clone())],
             PaneNode::Split { first, second, .. } => {
-                let mut result = first.all_terminals();
-                result.extend(second.all_terminals());
+                let mut result = first.all_panes();
+                result.extend(second.all_panes());
                 result
             }
         }
     }
 
-    /// Find a terminal by ID
-    pub fn find_terminal(&self, target_id: Uuid) -> Option<Entity<TerminalPane>> {
+    /// Finds a pane by its UUID.
+    ///
+    /// Searches the tree recursively and returns the pane if found.
+    pub fn find_pane(&self, target_id: Uuid) -> Option<PaneKind> {
         match self {
-            PaneNode::Leaf { id, terminal } => {
+            PaneNode::Leaf { id, pane } => {
                 if *id == target_id {
-                    Some(terminal.clone())
+                    Some(pane.clone())
                 } else {
                     None
                 }
             }
-            PaneNode::Split { first, second, .. } => {
-                first.find_terminal(target_id).or_else(|| second.find_terminal(target_id))
-            }
+            PaneNode::Split { first, second, .. } => first
+                .find_pane(target_id)
+                .or_else(|| second.find_pane(target_id)),
         }
     }
 
-    /// Remove a pane by ID, returning true if removed
+    /// Removes a pane from the tree by its UUID.
+    ///
+    /// When a leaf is removed, its parent split is replaced by the remaining sibling,
+    /// effectively "promoting" it up the tree. Returns the removed node if found.
     pub fn remove(&mut self, target_id: Uuid) -> Option<PaneNode> {
         // First check what action to take without borrowing mutably
         let action = match self {
@@ -152,110 +205,6 @@ impl PaneNode {
             PaneNode::Split { first, second, .. } => {
                 first.remove(target_id).or_else(|| second.remove(target_id))
             }
-        }
-    }
-
-    /// Render the pane tree
-    pub fn render(&self, active_pane: Uuid, _window: &mut Window, cx: &mut Context<'_, super::workspace::Workspace>) -> AnyElement {
-        // Get theme colors
-        let colors = terminal_colors(cx);
-        let accent = colors.accent;
-        let border = colors.border;
-
-        match self {
-            PaneNode::Leaf { id, terminal } => {
-                let is_active = *id == active_pane;
-                let pane_id = *id;
-
-                div()
-                    .id(ElementId::Name(format!("pane-{}", id).into()))
-                    .size_full()
-                    .border_1()
-                    .bg(colors.background)
-                    .when(is_active, |d| d.border_color(accent))
-                    .when(!is_active, |d| d.border_color(border))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.set_active_pane(pane_id, cx);
-                    }))
-                    .child(terminal.clone())
-                    .into_any_element()
-            }
-            PaneNode::Split { direction, first, second, ratio } => {
-                let ratio = *ratio;
-
-                let first_elem = first.render(active_pane, _window, cx);
-                let second_elem = second.render(active_pane, _window, cx);
-
-                match direction {
-                    SplitDirection::Horizontal => {
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_row()
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(ratio))
-                                    .child(first_elem)
-                            )
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(px(2.0))
-                                    .bg(border)
-                            )
-                            .child(
-                                div()
-                                    .h_full()
-                                    .w(relative(1.0 - ratio))
-                                    .child(second_elem)
-                            )
-                            .into_any_element()
-                    }
-                    SplitDirection::Vertical => {
-                        div()
-                            .size_full()
-                            .flex()
-                            .flex_col()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(relative(ratio))
-                                    .child(first_elem)
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(px(2.0))
-                                    .bg(border)
-                            )
-                            .child(
-                                div()
-                                    .w_full()
-                                    .h(relative(1.0 - ratio))
-                                    .child(second_elem)
-                            )
-                            .into_any_element()
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl Clone for PaneNode {
-    fn clone(&self) -> Self {
-        match self {
-            PaneNode::Leaf { id, terminal } => PaneNode::Leaf {
-                id: *id,
-                terminal: terminal.clone(),
-            },
-            PaneNode::Split { direction, first, second, ratio } => PaneNode::Split {
-                direction: *direction,
-                first: first.clone(),
-                second: second.clone(),
-                ratio: *ratio,
-            },
         }
     }
 }

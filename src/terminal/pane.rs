@@ -5,28 +5,55 @@
 //! - Merged background regions via paint_quad
 //! - Proper handling of TUI applications
 
+use super::colors::{apply_dim, color_to_hsla, get_bright_color};
+use super::types::{
+    BgRegion, CursorInfo, DisplayState, MouseEscBuf, RenderCell, RenderData, TermSize,
+};
 use super::PtyHandler;
 use crate::theme::{terminal_colors, TerminalColors};
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point as TermPoint, Side};
 use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{CursorShape, Processor};
+use base64::Engine;
 use gpui::*;
-use std::sync::{Arc, Mutex};
+use parking_lot::{Mutex, RwLock};
+use std::fmt::Write as FmtWrite;
+use std::sync::Arc;
 
-// Font configuration
-const DEFAULT_FONT_SIZE: f32 = 14.0;
-const MIN_FONT_SIZE: f32 = 8.0;
-const MAX_FONT_SIZE: f32 = 32.0;
-const FONT_FAMILY: &str = "Iosevka Nerd Font";
-const PADDING: f32 = 2.0;
+// Import centralized configuration
+use crate::config::terminal::{
+    DEFAULT_FONT_SIZE, FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, PADDING,
+};
 
-/// Calculate cell dimensions from actual font metrics
+/// Cache for cell dimensions to avoid recalculating every frame.
+/// Key is font_size (as bits), value is (width, height).
+static CELL_DIMS_CACHE: Mutex<Option<(u32, f32, f32)>> = Mutex::new(None);
+
+/// Calculate cell dimensions from actual font metrics (cached).
 fn get_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
+    let font_size_bits = font_size.to_bits();
+
+    // Fast path: return cached value if font size matches
+    {
+        let cache = CELL_DIMS_CACHE.lock();
+        if let Some((cached_size, width, height)) = *cache {
+            if cached_size == font_size_bits {
+                return (width, height);
+            }
+        }
+    }
+
+    // Slow path: calculate and cache
+    let (width, height) = calculate_cell_dimensions(window, font_size);
+    *CELL_DIMS_CACHE.lock() = Some((font_size_bits, width, height));
+    (width, height)
+}
+
+/// Actually calculate cell dimensions from font metrics.
+fn calculate_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
     let font = Font {
         family: FONT_FAMILY.into(),
         features: FontFeatures::default(),
@@ -47,51 +74,15 @@ fn get_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
     }];
 
     // Shape a single 'M' character (full-width in monospace)
-    let shaped = window.text_system().shape_line("M".into(), font_size_px, &runs, None);
-    let cell_width: f32 = shaped.width.into();
+    let shaped = window
+        .text_system()
+        .shape_line("M".into(), font_size_px, &runs, None);
+    let cell_width = shaped.width.into();
 
     // Use ascent + descent + some line spacing for cell height
-    let cell_height: f32 = font_size * 1.2;
+    let cell_height = font_size * 1.2;
 
     (cell_width, cell_height)
-}
-
-/// A background region to be painted
-#[derive(Clone)]
-struct BgRegion {
-    row: usize,
-    col_start: usize,
-    col_end: usize,
-    color: Hsla,
-}
-
-/// Cursor rendering info
-#[derive(Clone, Copy)]
-struct CursorInfo {
-    row: usize,
-    col: usize,
-    shape: CursorShape,
-    color: Hsla,
-}
-
-/// A single cell to render
-#[derive(Clone)]
-struct RenderCell {
-    row: usize,
-    col: usize,
-    c: char,
-    fg: Hsla,
-    flags: CellFlags,
-}
-
-/// Pre-computed render data for a single frame
-struct RenderData {
-    /// Cells to render (non-space cells only)
-    cells: Vec<RenderCell>,
-    /// Background regions (non-default backgrounds only)
-    bg_regions: Vec<BgRegion>,
-    /// Cursor info (separate from bg_regions for proper shape handling)
-    cursor: Option<CursorInfo>,
 }
 
 /// Event listener that captures terminal events (like title changes)
@@ -111,57 +102,45 @@ impl Listener {
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         if let Event::Title(title) = event {
-            *self.title.lock().unwrap() = Some(title);
+            *self.title.lock() = Some(title);
         }
     }
 }
 
-/// Size provider for the terminal
-#[derive(Clone, Copy, Debug)]
-struct TermSize {
-    cols: u16,
-    rows: u16,
-}
-
-impl Dimensions for TermSize {
-    fn total_lines(&self) -> usize {
-        self.rows as usize
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.rows as usize
-    }
-
-    fn columns(&self) -> usize {
-        self.cols as usize
-    }
-}
-
-/// Terminal pane that renders a PTY session
+/// Terminal pane that renders a PTY session.
+///
+/// Manages the PTY process, terminal emulator state, and rendering.
+/// State is organized into groups to minimize lock contention:
+/// - `pty`: Separate mutex for background I/O thread
+/// - `term`/`processor`: Terminal emulation state
+/// - `display`: Read-heavy display state (size, dims, bounds, font) uses RwLock
 pub struct TerminalPane {
+    /// PTY process handler for shell communication
     pty: Arc<Mutex<Option<PtyHandler>>>,
+    /// Terminal emulator state (screen buffer, cursor, etc.)
     term: Arc<Mutex<Term<Listener>>>,
+    /// VTE parser for processing escape sequences
     processor: Arc<Mutex<Processor>>,
+    /// Event listener for terminal events (title changes, etc.)
     listener: Listener,
-    size: Arc<Mutex<TermSize>>,
-    /// Cell dimensions (width, height) - calculated from font metrics
-    cell_dims: Arc<Mutex<(f32, f32)>>,
-    /// Element bounds in window coordinates (for mouse position conversion)
-    bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
-    /// Current font size
-    font_size: Arc<Mutex<f32>>,
+    /// Consolidated display state (size, cell_dims, bounds, font_size)
+    /// Uses RwLock for better read concurrency during rendering
+    display: Arc<RwLock<DisplayState>>,
     /// Whether we're currently dragging a selection
     dragging: bool,
+    /// Focus handle for keyboard input routing
     pub focus_handle: FocusHandle,
 }
 
 impl TerminalPane {
+    /// Create a new terminal pane with the user's default shell.
+    ///
+    /// Spawns a PTY process and starts polling for output. The terminal
+    /// starts with default dimensions (80x24) and resizes when rendered.
     pub fn new(cx: &mut Context<Self>) -> Self {
         // Use reasonable defaults - will be resized when layout occurs
-        let cols = 80;
-        let rows = 24;
-
-        let size = TermSize { cols, rows };
+        let display_state = DisplayState::default();
+        let size = display_state.size;
 
         // Create terminal with config and event listener
         let listener = Listener::new();
@@ -171,11 +150,11 @@ impl TerminalPane {
         let processor = Arc::new(Mutex::new(Processor::new()));
 
         // Spawn PTY
-        let pty = match PtyHandler::spawn(rows, cols) {
-            Ok(pty) => Some(pty),
+        let (pty, spawn_error) = match PtyHandler::spawn(size.rows, size.cols) {
+            Ok(pty) => (Some(pty), None),
             Err(e) => {
                 tracing::error!("Failed to spawn PTY: {}", e);
-                None
+                (None, Some(e.to_string()))
             }
         };
 
@@ -186,45 +165,78 @@ impl TerminalPane {
             term,
             processor,
             listener,
-            size: Arc::new(Mutex::new(size)),
-            // Default cell dims - will be calculated from font metrics on first render
-            cell_dims: Arc::new(Mutex::new((8.4, 17.0))),
-            bounds: Arc::new(Mutex::new(None)),
-            font_size: Arc::new(Mutex::new(DEFAULT_FONT_SIZE)),
+            display: Arc::new(RwLock::new(display_state)),
             dragging: false,
             focus_handle,
         };
 
-        // Start polling for PTY output
+        // Display error message in terminal if PTY spawn failed
+        if let Some(error) = spawn_error {
+            let error_msg = format!(
+                "\x1b[31m\x1b[1mError: Failed to spawn shell\x1b[0m\r\n\r\n{}\r\n\r\n\
+                 \x1b[33mTroubleshooting:\x1b[0m\r\n\
+                 - Check that your shell exists: echo $SHELL\r\n\
+                 - Try setting SHELL=/bin/zsh or SHELL=/bin/bash\r\n",
+                error
+            );
+            let mut term = pane.term.lock();
+            let mut processor = pane.processor.lock();
+            processor.advance(&mut *term, error_msg.as_bytes());
+        }
+
+        // Start event-driven PTY output processing with adaptive polling.
+        // Uses short intervals when data is flowing, longer intervals when idle.
+        // This reduces CPU usage from constant 16ms polling to near-zero when idle.
         let term_clone = pane.term.clone();
         let processor_clone = pane.processor.clone();
-
         let pty_clone = pane.pty.clone();
+
         cx.spawn(async move |this, cx| {
+            // Adaptive polling intervals (in ms)
+            const ACTIVE_INTERVAL: u64 = 8; // Fast when data flowing
+            const IDLE_INTERVAL: u64 = 100; // Slow when idle
+            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
+
+            let mut idle_count = 0u32;
+
             loop {
+                // Choose interval based on recent activity
+                let interval = if idle_count >= IDLE_THRESHOLD {
+                    IDLE_INTERVAL
+                } else {
+                    ACTIVE_INTERVAL
+                };
+
                 cx.background_executor()
-                    .timer(std::time::Duration::from_millis(16))
+                    .timer(std::time::Duration::from_millis(interval))
                     .await;
 
-                let should_notify = {
-                    let pty_guard = pty_clone.lock().unwrap();
+                let (should_notify, has_data) = {
+                    let pty_guard = pty_clone.lock();
                     if let Some(ref pty) = *pty_guard {
                         let output_chunks = pty.read_output();
                         drop(pty_guard);
                         if !output_chunks.is_empty() {
-                            let mut term = term_clone.lock().unwrap();
-                            let mut processor = processor_clone.lock().unwrap();
+                            let mut term = term_clone.lock();
+                            let mut processor = processor_clone.lock();
                             for chunk in output_chunks {
                                 processor.advance(&mut *term, &chunk);
                             }
-                            true
+                            (true, true)
                         } else {
-                            false
+                            (false, false)
                         }
                     } else {
-                        false
+                        (false, false)
                     }
                 };
+
+                // Update idle tracking
+                if has_data {
+                    idle_count = 0; // Reset on data
+                } else {
+                    idle_count = idle_count.saturating_add(1);
+                }
 
                 if should_notify {
                     let _ = this.update(cx, |_, cx| cx.notify());
@@ -238,7 +250,7 @@ impl TerminalPane {
 
     /// Send keyboard input to the PTY
     pub fn send_input(&mut self, input: &str) {
-        let mut pty_guard = self.pty.lock().unwrap();
+        let mut pty_guard = self.pty.lock();
         if let Some(ref mut pty) = *pty_guard {
             if let Err(e) = pty.write(input.as_bytes()) {
                 tracing::error!("Failed to write to PTY: {}", e);
@@ -250,7 +262,7 @@ impl TerminalPane {
 
     /// Check if the shell has exited
     pub fn has_exited(&self) -> bool {
-        let pty_guard = self.pty.lock().unwrap();
+        let pty_guard = self.pty.lock();
         match &*pty_guard {
             None => true,
             Some(pty) => pty.has_exited(),
@@ -259,7 +271,7 @@ impl TerminalPane {
 
     /// Check if the terminal has running child processes
     pub fn has_running_processes(&self) -> bool {
-        let pty_guard = self.pty.lock().unwrap();
+        let pty_guard = self.pty.lock();
         match &*pty_guard {
             None => false,
             Some(pty) => pty.has_running_processes(),
@@ -268,7 +280,7 @@ impl TerminalPane {
 
     /// Get the name of any running foreground process
     pub fn get_running_process_name(&self) -> Option<String> {
-        let pty_guard = self.pty.lock().unwrap();
+        let pty_guard = self.pty.lock();
         match &*pty_guard {
             None => None,
             Some(pty) => pty.get_running_process_name(),
@@ -276,15 +288,19 @@ impl TerminalPane {
     }
 
     /// Get the terminal title (set by OSC escape sequences)
-    pub fn title(&self) -> Option<String> {
-        self.listener.title.lock().unwrap().clone()
+    pub fn title(&self) -> Option<SharedString> {
+        self.listener
+            .title
+            .lock()
+            .as_ref()
+            .map(|s: &String| s.clone().into())
     }
 
     /// Convert pixel position (window coords) to terminal cell coordinates
     fn pixel_to_cell(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
-        // Get element bounds to convert from window coords to element-local coords
-        let bounds = self.bounds.lock().unwrap();
-        let bounds = bounds.as_ref()?;
+        // Get display state (single lock for all display-related fields)
+        let display = self.display.read();
+        let bounds = display.bounds.as_ref()?;
 
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
@@ -295,17 +311,16 @@ impl TerminalPane {
         let local_x = x - origin_x;
         let local_y = y - origin_y;
 
-        let (cell_width, cell_height) = *self.cell_dims.lock().unwrap();
+        let (cell_width, cell_height) = display.cell_dims;
 
         // Account for padding
         let cell_x = ((local_x - PADDING) / cell_width).floor() as i32;
         let cell_y = ((local_y - PADDING) / cell_height).floor() as i32;
 
-        let size = self.size.lock().unwrap();
         if cell_x >= 0
             && cell_y >= 0
-            && cell_x < size.cols as i32
-            && cell_y < size.rows as i32
+            && cell_x < display.size.cols as i32
+            && cell_y < display.size.rows as i32
         {
             Some((cell_x as usize, cell_y as usize))
         } else {
@@ -320,7 +335,7 @@ impl TerminalPane {
         };
 
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
@@ -339,21 +354,21 @@ impl TerminalPane {
                 _ => return,
             };
 
-            let seq = if mode.contains(TermMode::SGR_MOUSE) {
-                format!("\x1b[<{};{};{}M", button, col + 1, row + 1)
+            let mut buf = MouseEscBuf::new();
+            if mode.contains(TermMode::SGR_MOUSE) {
+                let _ = write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1);
             } else {
                 let cb = (32 + button) as u8;
                 let cx_val = (32 + col + 1).min(255) as u8;
                 let cy = (32 + row + 1).min(255) as u8;
-                format!("\x1b[M{}{}{}", cb as char, cx_val as char, cy as char)
-            };
-
-            self.send_input(&seq);
+                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
+            }
+            self.send_input(buf.as_str());
         } else if event.button == MouseButton::Left {
             // Start text selection using alacritty's Selection
             let point = TermPoint::new(Line(row as i32), Column(col));
             let selection = TermSelection::new(SelectionType::Simple, point, Side::Left);
-            self.term.lock().unwrap().selection = Some(selection);
+            self.term.lock().selection = Some(selection);
             self.dragging = true;
             cx.notify();
         }
@@ -366,12 +381,18 @@ impl TerminalPane {
         };
 
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
-        if mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION | TermMode::MOUSE_MODE) {
+        if mode.intersects(
+            TermMode::MOUSE_REPORT_CLICK
+                | TermMode::MOUSE_DRAG
+                | TermMode::MOUSE_MOTION
+                | TermMode::MOUSE_MODE,
+        ) {
             // Send mouse release to PTY
+            let mut buf = MouseEscBuf::new();
             if mode.contains(TermMode::SGR_MOUSE) {
                 let button = match event.button {
                     MouseButton::Left => 0,
@@ -379,20 +400,19 @@ impl TerminalPane {
                     MouseButton::Right => 2,
                     _ => return,
                 };
-                let seq = format!("\x1b[<{};{};{}m", button, col + 1, row + 1);
-                self.send_input(&seq);
+                let _ = write!(buf, "\x1b[<{};{};{}m", button, col + 1, row + 1);
             } else {
                 let cb = (32 + 3) as u8;
                 let cx_val = (32 + col + 1).min(255) as u8;
                 let cy = (32 + row + 1).min(255) as u8;
-                let seq = format!("\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
-                self.send_input(&seq);
+                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
             }
+            self.send_input(buf.as_str());
         } else if event.button == MouseButton::Left {
             // End text selection
             if self.dragging {
                 let point = TermPoint::new(Line(row as i32), Column(col));
-                if let Some(ref mut selection) = self.term.lock().unwrap().selection {
+                if let Some(ref mut selection) = self.term.lock().selection {
                     selection.update(point, Side::Right);
                 }
                 self.dragging = false;
@@ -410,7 +430,7 @@ impl TerminalPane {
         // Update selection if dragging
         if self.dragging {
             let point = TermPoint::new(Line(row as i32), Column(col));
-            if let Some(ref mut selection) = self.term.lock().unwrap().selection {
+            if let Some(ref mut selection) = self.term.lock().selection {
                 selection.update(point, Side::Right);
             }
             cx.notify();
@@ -424,27 +444,32 @@ impl TerminalPane {
         };
 
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
-        let (_, cell_height) = *self.cell_dims.lock().unwrap();
+        let (_, cell_height) = self.display.read().cell_dims;
 
         // If mouse reporting is enabled, send wheel events
-        if mode.intersects(TermMode::MOUSE_REPORT_CLICK | TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION | TermMode::MOUSE_MODE) {
+        if mode.intersects(
+            TermMode::MOUSE_REPORT_CLICK
+                | TermMode::MOUSE_DRAG
+                | TermMode::MOUSE_MOTION
+                | TermMode::MOUSE_MODE,
+        ) {
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let button = if delta_y < 0.0 { 64 } else { 65 }; // 64 = wheel up, 65 = wheel down
 
-            let seq = if mode.contains(TermMode::SGR_MOUSE) {
-                format!("\x1b[<{};{};{}M", button, col + 1, row + 1)
+            let mut buf = MouseEscBuf::new();
+            if mode.contains(TermMode::SGR_MOUSE) {
+                let _ = write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1);
             } else {
                 let cb = (32 + button) as u8;
                 let cx = (32 + col + 1).min(255) as u8;
                 let cy = (32 + row + 1).min(255) as u8;
-                format!("\x1b[M{}{}{}", cb as char, cx as char, cy as char)
-            };
-
-            self.send_input(&seq);
+                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx as char, cy as char);
+            }
+            self.send_input(buf.as_str());
         } else if mode.contains(TermMode::ALT_SCREEN) {
             // In alternate screen without mouse mode, send arrow keys for scrolling
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
@@ -460,7 +485,7 @@ impl TerminalPane {
     /// Handle a key event
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
@@ -484,21 +509,21 @@ impl TerminalPane {
                 }
                 "=" | "+" => {
                     // Zoom in (increase font size)
-                    let mut font_size = self.font_size.lock().unwrap();
-                    *font_size = (*font_size + 1.0).min(MAX_FONT_SIZE);
+                    let mut display = self.display.write();
+                    display.font_size = (display.font_size + 1.0).min(MAX_FONT_SIZE);
                     cx.notify();
                     return;
                 }
                 "-" => {
                     // Zoom out (decrease font size)
-                    let mut font_size = self.font_size.lock().unwrap();
-                    *font_size = (*font_size - 1.0).max(MIN_FONT_SIZE);
+                    let mut display = self.display.write();
+                    display.font_size = (display.font_size - 1.0).max(MIN_FONT_SIZE);
                     cx.notify();
                     return;
                 }
                 "0" => {
                     // Reset to default font size
-                    *self.font_size.lock().unwrap() = DEFAULT_FONT_SIZE;
+                    self.display.write().font_size = DEFAULT_FONT_SIZE;
                     cx.notify();
                     return;
                 }
@@ -531,7 +556,7 @@ impl TerminalPane {
         let input = match &event.keystroke.key {
             key if key.len() == 1 => {
                 // Clear selection on typing
-                self.term.lock().unwrap().selection = None;
+                self.term.lock().selection = None;
 
                 let c = key.chars().next().unwrap();
 
@@ -557,7 +582,7 @@ impl TerminalPane {
                     "tab" => "\t".to_string(),
                     "escape" => {
                         // Clear selection on escape
-                        self.term.lock().unwrap().selection = None;
+                        self.term.lock().selection = None;
                         cx.notify();
                         "\x1b".to_string()
                     }
@@ -605,7 +630,7 @@ impl TerminalPane {
 
     /// Get selected text from terminal using alacritty's selection
     fn get_selected_text(&self) -> Option<String> {
-        let term = self.term.lock().unwrap();
+        let term = self.term.lock();
         let content = term.renderable_content();
 
         // Get selection range from renderable content
@@ -613,58 +638,68 @@ impl TerminalPane {
         let start = selection_range.start;
         let end = selection_range.end;
 
-        let size = self.size.lock().unwrap();
-        let cols = size.cols as usize;
-        drop(size);
-
-        // Build a grid of characters
-        let rows = term.screen_lines();
-        let mut grid: Vec<Vec<char>> = vec![vec![' '; cols]; rows];
-
-        for cell in content.display_iter {
-            let row = cell.point.line.0 as usize;
-            let col = cell.point.column.0;
-            if row < rows && col < cols {
-                if !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                    grid[row][col] = cell.c;
-                }
-            }
-        }
-        drop(term);
-
-        // Extract selected text
         let start_row = start.line.0 as usize;
         let start_col = start.column.0;
         let end_row = end.line.0 as usize;
         let end_col = end.column.0;
 
+        // Stream directly from display_iter - no intermediate grid allocation
         let mut result = String::new();
-        for row in start_row..=end_row {
-            if row >= grid.len() {
-                break;
-            }
-            let col_start = if row == start_row { start_col } else { 0 };
-            let col_end = if row == end_row { end_col + 1 } else { cols };
-            let col_end = col_end.min(grid[row].len());
+        let mut current_row = start_row;
+        let mut row_content = String::new();
 
-            for col in col_start..col_end {
-                result.push(grid[row][col]);
+        for cell in content.display_iter {
+            let row = cell.point.line.0 as usize;
+            let col = cell.point.column.0;
+
+            // Skip cells outside selection
+            if row < start_row || row > end_row {
+                continue;
+            }
+            if row == start_row && col < start_col {
+                continue;
+            }
+            if row == end_row && col > end_col {
+                continue;
+            }
+            if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                continue;
             }
 
-            // Add newline between rows (but not after the last row)
-            if row < end_row {
-                // Trim trailing spaces before newline
-                while result.ends_with(' ') {
-                    result.pop();
-                }
+            // Handle row transitions
+            if row != current_row {
+                // Flush previous row (trim trailing spaces, add newline)
+                let trimmed = row_content.trim_end();
+                result.push_str(trimmed);
                 result.push('\n');
+                row_content.clear();
+
+                // Fill gaps if we skipped rows
+                for _ in (current_row + 1)..row {
+                    result.push('\n');
+                }
+                current_row = row;
             }
+
+            // Pad with spaces if we skipped columns
+            let target_col = if row == start_row {
+                col - start_col
+            } else {
+                col
+            };
+            while row_content.chars().count() < target_col {
+                row_content.push(' ');
+            }
+
+            row_content.push(cell.c);
         }
 
-        // Trim trailing spaces
-        while result.ends_with(' ') {
-            result.pop();
-        }
+        // Flush last row
+        let trimmed = row_content.trim_end();
+        result.push_str(trimmed);
+
+        // Trim trailing whitespace from entire result
+        let result = result.trim_end().to_string();
 
         if result.is_empty() {
             None
@@ -680,156 +715,116 @@ impl TerminalPane {
         }
     }
 
-    /// Paste from clipboard
+    /// Handle dropped files - converts images to base64 data URLs for AI assistants
+    fn handle_file_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        let paths = paths.paths();
+        if paths.is_empty() {
+            return;
+        }
+
+        let mut output = String::new();
+
+        for path in paths {
+            // Check if it's an image file by extension
+            let is_image = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    matches!(
+                        ext.to_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+                    )
+                })
+                .unwrap_or(false);
+
+            if is_image {
+                // Read and base64 encode image for AI assistants
+                match std::fs::read(path) {
+                    Ok(data) => {
+                        let mime = match path.extension().and_then(|e| e.to_str()) {
+                            Some("png") => "image/png",
+                            Some("jpg") | Some("jpeg") => "image/jpeg",
+                            Some("gif") => "image/gif",
+                            Some("webp") => "image/webp",
+                            Some("bmp") => "image/bmp",
+                            _ => "application/octet-stream",
+                        };
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                        // Output as data URL (supported by Claude and other AI assistants)
+                        if !output.is_empty() {
+                            output.push(' ');
+                        }
+                        output.push_str(&format!("data:{};base64,{}", mime, encoded));
+                        tracing::info!("Encoded dropped image: {:?} ({} bytes)", path, data.len());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read dropped file {:?}: {}", path, e);
+                        // Fall back to path
+                        if !output.is_empty() {
+                            output.push(' ');
+                        }
+                        output.push_str(&path.to_string_lossy());
+                    }
+                }
+            } else {
+                // Non-image file: just paste the path
+                if !output.is_empty() {
+                    output.push(' ');
+                }
+                // Quote paths with spaces
+                let path_str = path.to_string_lossy();
+                if path_str.contains(' ') {
+                    output.push('"');
+                    output.push_str(&path_str);
+                    output.push('"');
+                } else {
+                    output.push_str(&path_str);
+                }
+            }
+        }
+
+        if !output.is_empty() {
+            // Use bracketed paste mode if enabled
+            let bracketed_paste = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+            self.term.lock().selection = None;
+
+            if bracketed_paste {
+                self.send_input("\x1b[200~");
+                self.send_input(&output);
+                self.send_input("\x1b[201~");
+            } else {
+                self.send_input(&output);
+            }
+            cx.notify();
+        }
+    }
+
+    /// Paste from clipboard with bracketed paste mode support.
+    /// Wraps pasted content with escape sequences if the terminal has
+    /// bracketed paste mode enabled, preventing paste injection attacks.
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
                 // Clear selection
-                self.term.lock().unwrap().selection = None;
-                // Paste text to terminal
-                self.send_input(&text);
+                let term_guard = self.term.lock();
+                let bracketed_paste = term_guard.mode().contains(TermMode::BRACKETED_PASTE);
+                drop(term_guard);
+
+                self.term.lock().selection = None;
+
+                // Wrap with bracketed paste escape sequences if mode is enabled
+                if bracketed_paste {
+                    // Start bracketed paste: ESC[200~
+                    self.send_input("\x1b[200~");
+                    self.send_input(&text);
+                    // End bracketed paste: ESC[201~
+                    self.send_input("\x1b[201~");
+                } else {
+                    self.send_input(&text);
+                }
                 cx.notify();
             }
         }
-    }
-}
-
-/// Convert RGB to Hsla
-fn rgb_to_hsla(rgb: Rgb) -> Hsla {
-    Hsla::from(Rgba {
-        r: rgb.r as f32 / 255.0,
-        g: rgb.g as f32 / 255.0,
-        b: rgb.b as f32 / 255.0,
-        a: 1.0,
-    })
-}
-
-/// Convert alacritty color to GPUI Hsla using terminal colors with theme fallbacks
-fn color_to_hsla(color: Color, term_colors: &TermColors, theme: &TerminalColors) -> Hsla {
-    match color {
-        Color::Named(named) => {
-            // Check if terminal has custom color set, otherwise use theme
-            if let Some(rgb) = term_colors[named] {
-                rgb_to_hsla(rgb)
-            } else {
-                named_color_to_hsla(named, theme)
-            }
-        }
-        Color::Spec(rgb) => rgb_to_hsla(rgb),
-        Color::Indexed(idx) => {
-            // Check if terminal has custom color set
-            if let Some(rgb) = term_colors[idx as usize] {
-                rgb_to_hsla(rgb)
-            } else {
-                indexed_color_to_hsla(idx, theme)
-            }
-        }
-    }
-}
-
-fn named_color_to_hsla(color: NamedColor, colors: &TerminalColors) -> Hsla {
-    match color {
-        NamedColor::Black => colors.black,
-        NamedColor::Red => colors.red,
-        NamedColor::Green => colors.green,
-        NamedColor::Yellow => colors.yellow,
-        NamedColor::Blue => colors.blue,
-        NamedColor::Magenta => colors.magenta,
-        NamedColor::Cyan => colors.cyan,
-        NamedColor::White => colors.white,
-        NamedColor::BrightBlack => colors.bright_black,
-        NamedColor::BrightRed => colors.bright_red,
-        NamedColor::BrightGreen => colors.bright_green,
-        NamedColor::BrightYellow => colors.bright_yellow,
-        NamedColor::BrightBlue => colors.bright_blue,
-        NamedColor::BrightMagenta => colors.bright_magenta,
-        NamedColor::BrightCyan => colors.bright_cyan,
-        NamedColor::BrightWhite => colors.bright_white,
-        NamedColor::Foreground => colors.foreground,
-        NamedColor::Background => colors.background,
-        NamedColor::Cursor => colors.cursor,
-        _ => colors.foreground,
-    }
-}
-
-fn indexed_color_to_hsla(idx: u8, colors: &TerminalColors) -> Hsla {
-    match idx {
-        0..=15 => {
-            let named = match idx {
-                0 => NamedColor::Black,
-                1 => NamedColor::Red,
-                2 => NamedColor::Green,
-                3 => NamedColor::Yellow,
-                4 => NamedColor::Blue,
-                5 => NamedColor::Magenta,
-                6 => NamedColor::Cyan,
-                7 => NamedColor::White,
-                8 => NamedColor::BrightBlack,
-                9 => NamedColor::BrightRed,
-                10 => NamedColor::BrightGreen,
-                11 => NamedColor::BrightYellow,
-                12 => NamedColor::BrightBlue,
-                13 => NamedColor::BrightMagenta,
-                14 => NamedColor::BrightCyan,
-                15 => NamedColor::BrightWhite,
-                _ => NamedColor::Foreground,
-            };
-            named_color_to_hsla(named, colors)
-        }
-        16..=231 => {
-            // 6x6x6 color cube
-            let idx = idx - 16;
-            let r = (idx / 36) as f32 / 5.0;
-            let g = ((idx % 36) / 6) as f32 / 5.0;
-            let b = (idx % 6) as f32 / 5.0;
-            Hsla::from(Rgba { r, g, b, a: 1.0 })
-        }
-        232..=255 => {
-            // Grayscale
-            let gray = (idx - 232) as f32 / 23.0 * 0.9 + 0.08;
-            hsla(0.0, 0.0, gray, 1.0)
-        }
-    }
-}
-
-/// Apply DIM flag - reduce brightness by 33%
-fn apply_dim(color: Hsla) -> Hsla {
-    hsla(color.h, color.s, color.l * 0.66, color.a)
-}
-
-/// Get bright variant of a named color
-fn get_bright_color(color: Color, term_colors: &TermColors, theme: &TerminalColors) -> Hsla {
-    match color {
-        Color::Named(NamedColor::Black) => {
-            term_colors[NamedColor::BrightBlack].map(rgb_to_hsla).unwrap_or(theme.bright_black)
-        }
-        Color::Named(NamedColor::Red) => {
-            term_colors[NamedColor::BrightRed].map(rgb_to_hsla).unwrap_or(theme.bright_red)
-        }
-        Color::Named(NamedColor::Green) => {
-            term_colors[NamedColor::BrightGreen].map(rgb_to_hsla).unwrap_or(theme.bright_green)
-        }
-        Color::Named(NamedColor::Yellow) => {
-            term_colors[NamedColor::BrightYellow].map(rgb_to_hsla).unwrap_or(theme.bright_yellow)
-        }
-        Color::Named(NamedColor::Blue) => {
-            term_colors[NamedColor::BrightBlue].map(rgb_to_hsla).unwrap_or(theme.bright_blue)
-        }
-        Color::Named(NamedColor::Magenta) => {
-            term_colors[NamedColor::BrightMagenta].map(rgb_to_hsla).unwrap_or(theme.bright_magenta)
-        }
-        Color::Named(NamedColor::Cyan) => {
-            term_colors[NamedColor::BrightCyan].map(rgb_to_hsla).unwrap_or(theme.bright_cyan)
-        }
-        Color::Named(NamedColor::White) => {
-            term_colors[NamedColor::BrightWhite].map(rgb_to_hsla).unwrap_or(theme.bright_white)
-        }
-        Color::Indexed(idx) if idx < 8 => {
-            // Convert 0-7 to bright variants (8-15)
-            let bright_idx = idx + 8;
-            term_colors[bright_idx as usize].map(rgb_to_hsla).unwrap_or_else(|| indexed_color_to_hsla(bright_idx, theme))
-        }
-        other => color_to_hsla(other, term_colors, theme),
     }
 }
 
@@ -892,6 +887,112 @@ fn create_text_run(len: usize, font_family: &SharedString, fg: Hsla, flags: Cell
     }
 }
 
+/// Shape text by rows (batched) to reduce allocations.
+/// Instead of shaping each character individually (O(cells) allocations),
+/// shapes entire rows (O(rows) allocations).
+fn shape_rows_batched(
+    cells: &[RenderCell],
+    rows: usize,
+    cols: usize,
+    font_family: &SharedString,
+    font_size: Pixels,
+    window: &mut Window,
+) -> Vec<ShapedLine> {
+    // Group cells by row
+    let mut row_cells: Vec<Vec<&RenderCell>> = vec![Vec::new(); rows];
+    for cell in cells {
+        if cell.row < rows {
+            row_cells[cell.row].push(cell);
+        }
+    }
+
+    // Shape each row
+    row_cells
+        .into_iter()
+        .map(|mut row| {
+            if row.is_empty() {
+                // Empty row - shape a single space to maintain line height
+                let run = create_text_run(1, font_family, Hsla::default(), CellFlags::empty());
+                window
+                    .text_system()
+                    .shape_line(" ".into(), font_size, &[run], None)
+            } else {
+                // Sort by column to ensure correct order
+                row.sort_by_key(|c| c.col);
+
+                // Build the row string and runs
+                // CRITICAL: TextRun.len is in BYTES, and runs MUST cover all bytes in text
+                // Otherwise GPUI may skip rendering parts of the text
+                let mut text = String::with_capacity(cols);
+                let mut runs: Vec<TextRun> = Vec::new();
+
+                let mut current_col = 0;
+                for cell in row {
+                    // Fill gaps with spaces - each space is 1 byte
+                    let gap = cell.col.saturating_sub(current_col);
+                    if gap > 0 {
+                        // Add spaces to text
+                        for _ in 0..gap {
+                            text.push(' ');
+                        }
+
+                        // MUST add spaces to a run so they get rendered
+                        // Use the upcoming cell's color so run can potentially merge
+                        runs.push(create_text_run(
+                            gap,
+                            font_family,
+                            cell.fg,
+                            CellFlags::empty(),
+                        ));
+                    }
+
+                    current_col = cell.col;
+
+                    // Add the cell character
+                    let char_len = cell.c.len_utf8();
+
+                    // Check if we can extend the previous run (same color AND flags)
+                    let can_extend = runs.last().is_some_and(|last_run| {
+                        last_run.color == cell.fg
+                            && last_run.font.weight
+                                == if cell.flags.contains(CellFlags::BOLD) {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                }
+                    });
+
+                    if can_extend {
+                        // Extend previous run
+                        runs.last_mut().unwrap().len += char_len;
+                    } else {
+                        // Start new run for this character
+                        runs.push(create_text_run(char_len, font_family, cell.fg, cell.flags));
+                    }
+
+                    text.push(cell.c);
+                    current_col += 1;
+                }
+
+                // Handle empty text
+                if text.is_empty() {
+                    text.push(' ');
+                    runs.push(create_text_run(
+                        1,
+                        font_family,
+                        Hsla::default(),
+                        CellFlags::empty(),
+                    ));
+                }
+
+                window
+                    .text_system()
+                    .shape_line(text.into(), font_size, &runs, None)
+            }
+        })
+        .collect()
+}
+
 /// Build render data from terminal state - collects individual cells for precise positioning
 fn build_render_data(
     term: &Term<Listener>,
@@ -908,8 +1009,9 @@ fn build_render_data(
     let mut cells: Vec<RenderCell> = Vec::new();
     let mut bg_regions: Vec<BgRegion> = Vec::new();
 
-    // Grid for tracking backgrounds (we need to process in order for region merging)
-    let mut grid_bg: Vec<Vec<Option<Hsla>>> = vec![vec![None; cols]; rows];
+    // Track current background region for on-the-fly merging (avoids grid allocation)
+    // (row, col_start, col_end, color)
+    let mut current_bg: Option<(usize, usize, usize, Hsla)> = None;
 
     // Get cursor info with shape
     let cursor_line = content.cursor.point.line.0;
@@ -969,17 +1071,46 @@ fn build_render_data(
         }
 
         // Apply cursor styling for block cursor
-        let is_cursor = cursor_info.map_or(false, |c| c.row == row && c.col == col);
-        let is_block_cursor = is_cursor && cursor_info.map_or(false, |c| {
-            matches!(c.shape, CursorShape::Block | CursorShape::HollowBlock)
-        });
+        let is_cursor = cursor_info.is_some_and(|c| c.row == row && c.col == col);
+        let is_block_cursor = is_cursor
+            && cursor_info
+                .is_some_and(|c| matches!(c.shape, CursorShape::Block | CursorShape::HollowBlock));
         if is_block_cursor {
             fg = theme.background;
         }
 
-        // Track non-default backgrounds
+        // Merge non-default backgrounds on-the-fly
         if bg != default_bg {
-            grid_bg[row][col] = Some(bg);
+            match &mut current_bg {
+                Some((cur_row, _start, end, color))
+                    if *cur_row == row && *end == col && *color == bg =>
+                {
+                    // Extend current region
+                    *end = col + 1;
+                }
+                Some((cur_row, start, end, color)) => {
+                    // Flush current region, start new
+                    bg_regions.push(BgRegion {
+                        row: *cur_row,
+                        col_start: *start,
+                        col_end: *end,
+                        color: *color,
+                    });
+                    current_bg = Some((row, col, col + 1, bg));
+                }
+                None => {
+                    // Start new region
+                    current_bg = Some((row, col, col + 1, bg));
+                }
+            }
+        } else if let Some((cur_row, start, end, color)) = current_bg.take() {
+            // Non-default to default transition: flush region
+            bg_regions.push(BgRegion {
+                row: cur_row,
+                col_start: start,
+                col_end: end,
+                color,
+            });
         }
 
         // Only add non-space characters to render list
@@ -994,44 +1125,21 @@ fn build_render_data(
         }
     }
 
-    // Build merged background regions from grid
-    for (row_idx, row) in grid_bg.into_iter().enumerate() {
-        let mut bg_start: Option<(usize, Hsla)> = None;
-
-        for (col_idx, bg_opt) in row.into_iter().enumerate() {
-            match (&mut bg_start, bg_opt) {
-                (None, Some(bg)) => {
-                    bg_start = Some((col_idx, bg));
-                }
-                (Some((_start, color)), Some(bg)) if *color == bg => {
-                    // Continue current region
-                }
-                (Some((start, color)), _) => {
-                    // Flush region
-                    bg_regions.push(BgRegion {
-                        row: row_idx,
-                        col_start: *start,
-                        col_end: col_idx,
-                        color: *color,
-                    });
-                    bg_start = bg_opt.map(|bg| (col_idx, bg));
-                }
-                (None, None) => {}
-            }
-        }
-
-        // Flush remaining bg region
-        if let Some((start, color)) = bg_start {
-            bg_regions.push(BgRegion {
-                row: row_idx,
-                col_start: start,
-                col_end: cols,
-                color,
-            });
-        }
+    // Flush any remaining background region
+    if let Some((row, col_start, col_end, color)) = current_bg {
+        bg_regions.push(BgRegion {
+            row,
+            col_start,
+            col_end,
+            color,
+        });
     }
 
-    RenderData { cells, bg_regions, cursor: cursor_info }
+    RenderData {
+        cells,
+        bg_regions,
+        cursor: cursor_info,
+    }
 }
 
 impl Render for TerminalPane {
@@ -1040,23 +1148,27 @@ impl Render for TerminalPane {
 
         // Get theme colors
         let colors = terminal_colors(cx);
+        let display_state = self.display.read();
+        tracing::trace!(
+            rows = display_state.size.rows,
+            cols = display_state.size.cols,
+            "Terminal render"
+        );
         let bg_color = colors.background;
         let font_family: SharedString = FONT_FAMILY.into();
 
-        // Get current font size
-        let current_font_size = *self.font_size.lock().unwrap();
+        // Get current font size and calculate cell dimensions
+        let current_font_size = display_state.font_size;
+        drop(display_state); // Release read lock before write
 
         // Calculate cell dimensions from actual font metrics
         let (cell_width, cell_height) = get_cell_dimensions(window, current_font_size);
-        *self.cell_dims.lock().unwrap() = (cell_width, cell_height);
+        self.display.write().cell_dims = (cell_width, cell_height);
 
         // Clone data needed for canvas callbacks (resize happens in prepaint with actual bounds)
         let term = self.term.clone();
         let pty = self.pty.clone();
-        let size = self.size.clone();
-        let cell_dims = self.cell_dims.clone();
-        let bounds_arc = self.bounds.clone();
-        let font_size_arc = self.font_size.clone();
+        let display_arc = self.display.clone();
         let colors_clone = colors;
         let font_family_clone = font_family.clone();
 
@@ -1067,7 +1179,7 @@ impl Render for TerminalPane {
             .track_focus(&focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "," {
-                    crate::app::open_settings_dialog(window, cx);
+                    crate::app::toggle_settings_dialog(window, cx);
                     return;
                 }
                 this.handle_key(event, cx);
@@ -1075,29 +1187,50 @@ impl Render for TerminalPane {
             .on_click(cx.listener(|_this, _event: &ClickEvent, window, cx| {
                 window.focus(&cx.focus_handle());
             }))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down(event, cx);
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down(event, cx);
-            }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, event: &MouseDownEvent, _window, cx| {
-                this.handle_mouse_down(event, cx);
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                this.handle_mouse_up(event, cx);
-            }))
-            .on_mouse_up(MouseButton::Right, cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                this.handle_mouse_up(event, cx);
-            }))
-            .on_mouse_up(MouseButton::Middle, cx.listener(|this, event: &MouseUpEvent, _window, cx| {
-                this.handle_mouse_up(event, cx);
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.handle_mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.handle_mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.handle_mouse_down(event, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_mouse_up(event, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_mouse_up(event, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.handle_mouse_up(event, cx);
+                }),
+            )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.handle_mouse_move(event, cx);
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, _cx| {
                 this.handle_scroll(event);
+            }))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                this.handle_file_drop(paths, cx);
             }))
             .size_full()
             .bg(bg_color)
@@ -1106,52 +1239,73 @@ impl Render for TerminalPane {
                 canvas(
                     // Prepaint: compute render data and shape individual cells
                     move |bounds, window, _cx| {
-                        // Store bounds for mouse coordinate conversion
-                        *bounds_arc.lock().unwrap() = Some(bounds);
-
-                        // Get cell dimensions from font metrics
-                        let (cell_width, cell_height) = *cell_dims.lock().unwrap();
+                        // Get display state and update bounds
+                        let (cell_width, cell_height, current_font_size) = {
+                            let mut display = display_arc.write();
+                            display.bounds = Some(bounds);
+                            (display.cell_dims.0, display.cell_dims.1, display.font_size)
+                        };
 
                         // Calculate terminal size from actual element bounds
                         let bounds_width: f32 = bounds.size.width.into();
                         let bounds_height: f32 = bounds.size.height.into();
 
-                        let new_cols = ((bounds_width - PADDING * 2.0).max(0.0) / cell_width).floor() as u16;
-                        let new_rows = ((bounds_height - PADDING * 2.0).max(0.0) / cell_height).floor() as u16;
+                        let new_cols =
+                            ((bounds_width - PADDING * 2.0).max(0.0) / cell_width).floor() as u16;
+                        let new_rows =
+                            ((bounds_height - PADDING * 2.0).max(0.0) / cell_height).floor() as u16;
                         let new_cols = new_cols.max(10);
                         let new_rows = new_rows.max(3);
 
                         // Check if resize is needed
-                        let mut size_guard = size.lock().unwrap();
-                        if new_cols != size_guard.cols || new_rows != size_guard.rows {
-                            size_guard.cols = new_cols;
-                            size_guard.rows = new_rows;
-                            let new_size = *size_guard;
-                            drop(size_guard);
+                        let needs_resize = {
+                            let display = display_arc.read();
+                            new_cols != display.size.cols || new_rows != display.size.rows
+                        };
+
+                        if needs_resize {
+                            // Update display state
+                            {
+                                let mut display = display_arc.write();
+                                display.size.cols = new_cols;
+                                display.size.rows = new_rows;
+                            }
+
+                            let new_size = TermSize {
+                                cols: new_cols,
+                                rows: new_rows,
+                            };
 
                             // Resize PTY
-                            if let Ok(pty_guard) = pty.lock() {
+                            {
+                                let pty_guard = pty.lock();
                                 if let Some(ref pty_inner) = *pty_guard {
-                                    let _ = pty_inner.resize(new_rows, new_cols);
+                                    if let Err(e) = pty_inner.resize(new_rows, new_cols) {
+                                        tracing::error!(
+                                            "Failed to resize PTY to {}x{}: {}",
+                                            new_cols,
+                                            new_rows,
+                                            e
+                                        );
+                                    }
                                 }
                             }
 
                             // Resize terminal emulator
-                            if let Ok(mut term_guard) = term.lock() {
+                            {
+                                let mut term_guard = term.lock();
                                 term_guard.resize(new_size);
                             }
-                        } else {
-                            drop(size_guard);
                         }
 
                         // Get current size for rendering
-                        let size_guard = size.lock().unwrap();
-                        let cols = size_guard.cols as usize;
-                        let rows = size_guard.rows as usize;
-                        drop(size_guard);
+                        let (cols, rows) = {
+                            let display = display_arc.read();
+                            (display.size.cols as usize, display.size.rows as usize)
+                        };
 
                         // Build render data from terminal state and get selection
-                        let term_guard = term.lock().unwrap();
+                        let term_guard = term.lock();
                         let render_data = build_render_data(
                             &term_guard,
                             &colors_clone,
@@ -1163,34 +1317,43 @@ impl Render for TerminalPane {
                         let selection_range = term_guard.renderable_content().selection;
                         drop(term_guard);
 
-                        // Shape each cell individually for precise positioning
-                        let current_font_size = *font_size_arc.lock().unwrap();
+                        // Shape text by row to reduce allocations (O(rows) instead of O(cells))
                         let font_size = px(current_font_size);
-                        let shaped_cells: Vec<_> = render_data
-                            .cells
-                            .iter()
-                            .map(|cell| {
-                                let text_run = create_text_run(
-                                    cell.c.len_utf8(),
-                                    &font_family_clone,
-                                    cell.fg,
-                                    cell.flags,
-                                );
-                                let shaped = window.text_system().shape_line(
-                                    cell.c.to_string().into(),
-                                    font_size,
-                                    &[text_run],
-                                    None,
-                                );
-                                (cell.row, cell.col, shaped)
-                            })
-                            .collect();
+                        let shaped_rows = shape_rows_batched(
+                            &render_data.cells,
+                            rows,
+                            cols,
+                            &font_family_clone,
+                            font_size,
+                            window,
+                        );
 
-                        (render_data, shaped_cells, bounds, cell_width, cell_height, selection_range, cols)
+                        // Use theme selection color with alpha for transparency
+                        let selection_color = colors_clone.selection;
+
+                        (
+                            render_data,
+                            shaped_rows,
+                            bounds,
+                            cell_width,
+                            cell_height,
+                            selection_range,
+                            cols,
+                            selection_color,
+                        )
                     },
-                    // Paint: draw backgrounds and individual cells at exact grid positions
+                    // Paint: draw backgrounds and row-batched text
                     move |_bounds, data, window, cx| {
-                        let (render_data, shaped_cells, bounds, cell_width, cell_height, selection_range, cols) = data;
+                        let (
+                            render_data,
+                            shaped_rows,
+                            bounds,
+                            cell_width,
+                            cell_height,
+                            selection_range,
+                            cols,
+                            selection_color,
+                        ) = data;
 
                         let origin = bounds.origin;
                         let line_height = px(cell_height);
@@ -1215,8 +1378,6 @@ impl Render for TerminalPane {
                                 && sel.start.column == sel.end.column;
 
                             if !start_same_as_end {
-                                let selection_color = hsla(210.0 / 360.0, 0.6, 0.5, 0.3);
-
                                 // SelectionRange uses viewport coordinates (line.0 >= 0 for visible lines)
                                 let start_line = sel.start.line.0;
                                 let end_line = sel.end.line.0;
@@ -1229,10 +1390,13 @@ impl Render for TerminalPane {
                                     let end_col = sel.end.column.0;
 
                                     for row in start_row..=end_row {
-                                        let col_start = if row == start_row { start_col } else { 0 };
-                                        let col_end = if row == end_row { end_col + 1 } else { cols };
+                                        let col_start =
+                                            if row == start_row { start_col } else { 0 };
+                                        let col_end =
+                                            if row == end_row { end_col + 1 } else { cols };
 
-                                        let x = origin.x + px(PADDING + col_start as f32 * cell_width);
+                                        let x =
+                                            origin.x + px(PADDING + col_start as f32 * cell_width);
                                         let y = origin.y + px(PADDING + row as f32 * cell_height);
                                         let width = px((col_end - col_start) as f32 * cell_width);
                                         let height = px(cell_height);
@@ -1246,16 +1410,17 @@ impl Render for TerminalPane {
                             }
                         }
 
-                        // 2. Paint each cell at its exact grid position
-                        for (row, col, shaped) in &shaped_cells {
-                            let x = origin.x + px(PADDING + *col as f32 * cell_width);
-                            let y = origin.y + px(PADDING + *row as f32 * cell_height);
-                            let _ = shaped.paint(Point::new(x, y), line_height, window, cx);
+                        // 2. Paint each row of text (batched for performance)
+                        for (row_idx, shaped_line) in shaped_rows.iter().enumerate() {
+                            let x = origin.x + px(PADDING);
+                            let y = origin.y + px(PADDING + row_idx as f32 * cell_height);
+                            let _ = shaped_line.paint(Point::new(x, y), line_height, window, cx);
                         }
 
                         // 3. Paint cursor based on shape
                         if let Some(cursor) = render_data.cursor {
-                            let cursor_x = origin.x + px(PADDING + cursor.col as f32 * cell_width);
+                            let cursor_x =
+                                origin.x + px(PADDING + (cursor.col + 1) as f32 * cell_width);
                             let cursor_y = origin.y + px(PADDING + cursor.row as f32 * cell_height);
 
                             match cursor.shape {
@@ -1266,15 +1431,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Bottom
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x, cursor_y + px(cell_height) - thickness),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Point::new(
+                                                cursor_x,
+                                                cursor_y + px(cell_height) - thickness,
+                                            ),
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1282,15 +1456,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Right
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x + px(cell_width) - thickness, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Point::new(
+                                                cursor_x + px(cell_width) - thickness,
+                                                cursor_y,
+                                            ),
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1302,15 +1485,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Bottom
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x, cursor_y + px(cell_height) - thickness),
-                                            Size { width: px(cell_width), height: thickness },
+                                            Point::new(
+                                                cursor_x,
+                                                cursor_y + px(cell_height) - thickness,
+                                            ),
+                                            Size {
+                                                width: px(cell_width),
+                                                height: thickness,
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1318,15 +1510,24 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
                                     // Right
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x + px(cell_width) - thickness, cursor_y),
-                                            Size { width: thickness, height: px(cell_height) },
+                                            Point::new(
+                                                cursor_x + px(cell_width) - thickness,
+                                                cursor_y,
+                                            ),
+                                            Size {
+                                                width: thickness,
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1336,7 +1537,10 @@ impl Render for TerminalPane {
                                     window.paint_quad(fill(
                                         Bounds::new(
                                             Point::new(cursor_x, cursor_y),
-                                            Size { width: px(2.0), height: px(cell_height) },
+                                            Size {
+                                                width: px(2.0),
+                                                height: px(cell_height),
+                                            },
                                         ),
                                         cursor.color,
                                     ));
@@ -1345,8 +1549,14 @@ impl Render for TerminalPane {
                                     // Thin horizontal bar at bottom
                                     window.paint_quad(fill(
                                         Bounds::new(
-                                            Point::new(cursor_x, cursor_y + px(cell_height) - px(2.0)),
-                                            Size { width: px(cell_width), height: px(2.0) },
+                                            Point::new(
+                                                cursor_x,
+                                                cursor_y + px(cell_height) - px(2.0),
+                                            ),
+                                            Size {
+                                                width: px(cell_width),
+                                                height: px(2.0),
+                                            },
                                         ),
                                         cursor.color,
                                     ));

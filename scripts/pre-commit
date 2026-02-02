@@ -1,0 +1,30 @@
+#!/bin/sh
+# Pre-commit hook for HumanSSH
+# Runs formatting check, clippy, and cargo check
+
+set -e
+
+echo "🔍 Running pre-commit checks..."
+
+# Check formatting
+echo "  → cargo fmt --check"
+if ! cargo fmt --check --quiet 2>/dev/null; then
+    echo "❌ Formatting issues found. Run 'cargo fmt' to fix."
+    exit 1
+fi
+
+# Run clippy
+echo "  → cargo clippy"
+if ! cargo clippy --quiet -- -D warnings 2>/dev/null; then
+    echo "❌ Clippy warnings found. Fix them before committing."
+    exit 1
+fi
+
+# Check compilation
+echo "  → cargo check"
+if ! cargo check --quiet 2>/dev/null; then
+    echo "❌ Compilation failed."
+    exit 1
+fi
+
+echo "✅ All checks passed!"

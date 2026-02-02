@@ -5,8 +5,8 @@
 use anyhow::{Context, Result};
 use gpui::*;
 use gpui_component_assets::Assets;
-use humanssh::app::Workspace;
 use humanssh::actions::Quit;
+use humanssh::app::Workspace;
 use humanssh::theme;
 use once_cell::sync::Lazy;
 use std::time::Instant;
@@ -15,15 +15,14 @@ use tracing::{debug, error, info};
 /// Application startup time for performance monitoring
 static STARTUP_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
-/// Initialize required directories.
+/// Initialize required directories (cross-platform).
+/// Uses platform-appropriate directories via the `dirs` crate.
 fn init_paths() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME environment variable not set")?;
-    let config_dir = std::path::PathBuf::from(&home)
-        .join(".config")
+    let config_dir = dirs::config_dir()
+        .context("Could not determine config directory")?
         .join("humanssh");
-    let data_dir = std::path::PathBuf::from(&home)
-        .join(".local")
-        .join("share")
+    let data_dir = dirs::data_dir()
+        .context("Could not determine data directory")?
         .join("humanssh");
 
     std::fs::create_dir_all(&config_dir)
@@ -38,29 +37,50 @@ fn init_paths() -> Result<()> {
     Ok(())
 }
 
+/// Check if debug mode is enabled via environment variable.
+fn is_debug_mode() -> bool {
+    std::env::var("HUMANSSH_DEBUG").is_ok()
+}
+
 /// Initialize the logging system.
 fn init_logging() {
-    use tracing_subscriber::{EnvFilter, fmt, prelude::*};
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("humanssh=info,warn"));
+    // In debug mode, enable trace logging for humanssh
+    let default_filter = if is_debug_mode() {
+        "humanssh=trace,gpui=debug,info"
+    } else {
+        "humanssh=info,warn"
+    };
+
+    let filter =
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_filter));
 
     tracing_subscriber::registry()
         .with(fmt::layer().with_target(true).with_line_number(true))
         .with(filter)
         .init();
 
-    info!("HumanSSH v{} starting up", env!("CARGO_PKG_VERSION"));
+    if is_debug_mode() {
+        info!(
+            "HumanSSH v{} starting up (DEBUG MODE ENABLED)",
+            env!("CARGO_PKG_VERSION")
+        );
+        info!("Set RUST_LOG for custom log levels, e.g. RUST_LOG=humanssh=trace");
+    } else {
+        info!("HumanSSH v{} starting up", env!("CARGO_PKG_VERSION"));
+    }
 }
 
-/// Build window options.
+/// Build window options using saved bounds.
 fn build_window_options() -> WindowOptions {
+    let saved = theme::load_window_bounds();
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(100.0), px(100.0)),
+            origin: Point::new(px(saved.x), px(saved.y)),
             size: Size {
-                width: px(1200.0),
-                height: px(800.0),
+                width: px(saved.width),
+                height: px(saved.height),
             },
         })),
         titlebar: Some(TitlebarOptions {
@@ -86,7 +106,7 @@ fn open_main_window(cx: &mut App) -> Result<()> {
 
 /// Register keybindings.
 fn register_keybindings(cx: &mut App) {
-    use humanssh::actions::{OpenSettings, CloseTab};
+    use humanssh::actions::{CloseTab, OpenSettings};
 
     // Note: Quit action is handled by Workspace.request_quit() for confirmation
     // The global handler is a fallback that shouldn't normally trigger

@@ -1,15 +1,21 @@
 //! Main workspace - container for tabs and split panes.
 
+use super::pane::PaneKind;
 use super::pane_group::{PaneNode, SplitDirection};
-use crate::actions::{OpenSettings, CloseTab, Quit};
+use crate::actions::{CloseTab, OpenSettings, Quit};
+use crate::config::timing;
 use crate::terminal::TerminalPane;
 use crate::theme::{terminal_colors, SwitchTheme};
 use gpui::prelude::FluentBuilder;
-use gpui::*;
+use gpui::{
+    div, hsla, px, App, AppContext, ClickEvent, Context, ElementId, FontWeight, InteractiveElement,
+    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
+    Styled, Window,
+};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::DropdownMenu;
 use gpui_component::theme::ThemeRegistry;
-use gpui_component::{v_flex, ActiveTheme, IconName, Root, Sizable, StyledExt, WindowExt};
+use gpui_component::{ActiveTheme, IconName, Root, Sizable};
 use uuid::Uuid;
 
 /// Pending action requiring confirmation
@@ -23,18 +29,17 @@ enum PendingAction {
 /// A single tab in the workspace
 struct Tab {
     id: Uuid,
-    fallback_title: String,
+    fallback_title: SharedString,
     panes: PaneNode,
     active_pane: Uuid,
 }
 
 impl Tab {
-    /// Get the display title for this tab (dynamic from terminal or fallback)
-    fn display_title(&self, cx: &App) -> String {
-        // Try to get dynamic title from the active pane's terminal
-        if let Some(terminal) = self.panes.find_terminal(self.active_pane) {
-            if let Some(title) = terminal.read(cx).title() {
-                // Extract just the last component (e.g., "vim file.txt" or "zsh")
+    /// Get the display title for this tab (dynamic from pane or fallback)
+    fn display_title(&self, cx: &App) -> SharedString {
+        // Try to get dynamic title from the active pane
+        if let Some(pane) = self.panes.find_pane(self.active_pane) {
+            if let Some(title) = pane.title(cx) {
                 return title;
             }
         }
@@ -44,23 +49,34 @@ impl Tab {
 
 /// The main workspace view containing the tab bar and terminal panes.
 pub struct Workspace {
+    /// All open tabs, each containing a pane tree
     tabs: Vec<Tab>,
+    /// Index of the currently active tab
     active_tab: usize,
     /// Pending action requiring confirmation (shows dialog)
     pending_action: Option<PendingAction>,
     /// Process name for confirmation dialog
     pending_process_name: Option<String>,
+    /// Last time we checked for exited panes (debounce)
+    last_cleanup: std::time::Instant,
+    /// Cached tab titles to avoid recomputing every frame
+    cached_titles: Vec<SharedString>,
+    /// Last time we updated tab titles
+    last_title_update: std::time::Instant,
+    /// Last saved window bounds (for change detection)
+    last_saved_bounds: Option<(f32, f32, f32, f32)>,
 }
 
 impl Workspace {
+    /// Create a new workspace with a single tab containing one terminal pane.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let terminal = cx.new(TerminalPane::new);
-        let panes = PaneNode::new_leaf(terminal);
+        let panes = PaneNode::new_leaf(terminal.into());
         let active_pane = panes.first_leaf_id();
 
         let tab = Tab {
             id: Uuid::new_v4(),
-            fallback_title: "Terminal 1".to_string(),
+            fallback_title: "Terminal 1".into(),
             panes,
             active_pane,
         };
@@ -70,14 +86,62 @@ impl Workspace {
             active_tab: 0,
             pending_action: None,
             pending_process_name: None,
+            last_cleanup: std::time::Instant::now(),
+            cached_titles: vec!["Terminal 1".into()],
+            last_title_update: std::time::Instant::now(),
+            last_saved_bounds: None,
         }
+    }
+
+    /// Save window bounds if changed (called during render)
+    fn maybe_save_window_bounds(&mut self, window: &Window) {
+        let bounds = window.bounds();
+        let current: (f32, f32, f32, f32) = (
+            bounds.origin.x.into(),
+            bounds.origin.y.into(),
+            bounds.size.width.into(),
+            bounds.size.height.into(),
+        );
+
+        // Only save if bounds changed
+        if self.last_saved_bounds != Some(current) {
+            self.last_saved_bounds = Some(current);
+            crate::theme::save_window_bounds(crate::theme::WindowBoundsConfig {
+                x: current.0,
+                y: current.1,
+                width: current.2,
+                height: current.3,
+            });
+            tracing::trace!(
+                x = current.0,
+                y = current.1,
+                w = current.2,
+                h = current.3,
+                "Saved window bounds"
+            );
+        }
+    }
+
+    /// Get tab titles, using cache if fresh enough
+    fn get_tab_titles(&mut self, cx: &App) -> Vec<SharedString> {
+        // Return cached if fresh and tab count matches
+        if self.last_title_update.elapsed() < timing::TITLE_CACHE_TTL
+            && self.cached_titles.len() == self.tabs.len()
+        {
+            return self.cached_titles.clone();
+        }
+
+        // Refresh cache
+        self.cached_titles = self.tabs.iter().map(|t| t.display_title(cx)).collect();
+        self.last_title_update = std::time::Instant::now();
+        self.cached_titles.clone()
     }
 
     /// Check if a tab has any running child processes
     fn tab_has_running_processes(&self, index: usize, cx: &App) -> bool {
         if let Some(tab) = self.tabs.get(index) {
-            for (_, terminal) in tab.panes.all_terminals() {
-                if terminal.read(cx).has_running_processes() {
+            for (_, pane) in tab.panes.all_panes() {
+                if pane.has_running_processes(cx) {
                     return true;
                 }
             }
@@ -88,8 +152,8 @@ impl Workspace {
     /// Get the name of a running process in a tab (for display)
     fn get_tab_running_process_name(&self, index: usize, cx: &App) -> Option<String> {
         if let Some(tab) = self.tabs.get(index) {
-            for (_, terminal) in tab.panes.all_terminals() {
-                if let Some(name) = terminal.read(cx).get_running_process_name() {
+            for (_, pane) in tab.panes.all_panes() {
+                if let Some(name) = pane.get_running_process_name(cx) {
                     return Some(name);
                 }
             }
@@ -160,13 +224,13 @@ impl Workspace {
 
     fn new_tab(&mut self, cx: &mut Context<Self>) {
         let terminal = cx.new(TerminalPane::new);
-        let panes = PaneNode::new_leaf(terminal);
+        let panes = PaneNode::new_leaf(terminal.into());
         let active_pane = panes.first_leaf_id();
         let tab_num = self.tabs.len() + 1;
 
         let tab = Tab {
             id: Uuid::new_v4(),
-            fallback_title: format!("Terminal {}", tab_num),
+            fallback_title: format!("Terminal {}", tab_num).into(),
             panes,
             active_pane,
         };
@@ -215,10 +279,16 @@ impl Workspace {
     }
 
     /// Split the active pane
-    fn split_pane(&mut self, direction: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
+    fn split_pane(
+        &mut self,
+        direction: SplitDirection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let new_terminal = cx.new(TerminalPane::new);
-            if let Some(new_pane_id) = tab.panes.split(tab.active_pane, direction, new_terminal.clone()) {
+            let new_pane: PaneKind = new_terminal.clone().into();
+            if let Some(new_pane_id) = tab.panes.split(tab.active_pane, direction, new_pane) {
                 // Set the new pane as active
                 tab.active_pane = new_pane_id;
                 // Focus the new terminal
@@ -239,10 +309,10 @@ impl Workspace {
     /// Request to close the active pane (with confirmation if needed)
     fn request_close_pane(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            if let Some(terminal) = tab.panes.find_terminal(tab.active_pane) {
-                if terminal.read(cx).has_running_processes() {
+            if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                if pane.has_running_processes(cx) {
                     // Show confirmation
-                    self.pending_process_name = terminal.read(cx).get_running_process_name();
+                    self.pending_process_name = pane.get_running_process_name(cx);
                     self.pending_action = Some(PendingAction::ClosePane);
                     cx.notify();
                     return;
@@ -256,7 +326,7 @@ impl Workspace {
     /// Actually close the active pane (or tab if only one pane, or quit if last tab)
     fn do_close_pane(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            let pane_count = tab.panes.all_terminals().len();
+            let pane_count = tab.panes.all_panes().len();
 
             if pane_count <= 1 {
                 // Last pane in tab - close the tab
@@ -287,258 +357,40 @@ impl Workspace {
                 for theme in themes {
                     let name = theme.name.clone();
                     let is_current = current == name;
-                    menu = menu.menu_with_check(
-                        name.clone(),
-                        is_current,
-                        Box::new(SwitchTheme(name)),
-                    );
+                    menu =
+                        menu.menu_with_check(name.clone(), is_current, Box::new(SwitchTheme(name)));
                 }
 
                 menu
             })
     }
-
-    /// Toggle the settings modal (open if closed, close if open)
-    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // If dialog is already open, close it
-        if window.has_active_dialog(cx) {
-            window.close_dialog(cx);
-            return;
-        }
-
-        window.open_dialog(cx, |dialog, window, cx| {
-            dialog
-                .title("Settings")
-                .w(px(500.0))
-                .child(Self::render_settings_content(window, cx))
-        });
-    }
-
-    /// Render settings dialog content
-    fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let current_theme = cx.theme().theme_name().clone();
-        let current_font = cx.theme().font_family.to_string();
-
-        // Common monospace fonts for terminals
-        let fonts = [
-            "Iosevka Nerd Font",
-            "JetBrains Mono",
-            "Fira Code",
-            "SF Mono",
-            "Monaco",
-            "Menlo",
-            "Source Code Pro",
-            "Cascadia Code",
-            "Consolas",
-            "Ubuntu Mono",
-        ];
-
-        v_flex()
-            .gap_4()
-            // Theme selection
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Theme"),
-                    )
-                    .child(
-                        Button::new("theme-dropdown")
-                            .label(current_theme.clone())
-                            .outline()
-                            .w_full()
-                            .dropdown_menu(move |menu, _, cx| {
-                                let themes = ThemeRegistry::global(cx).sorted_themes();
-                                let current = cx.theme().theme_name().clone();
-                                let mut menu = menu.min_w(px(200.0));
-                                for theme in themes {
-                                    let name = theme.name.clone();
-                                    let is_current = current == name;
-                                    menu = menu.menu_with_check(
-                                        name.clone(),
-                                        is_current,
-                                        Box::new(SwitchTheme(name)),
-                                    );
-                                }
-                                menu
-                            }),
-                    ),
-            )
-            // Font selection
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Terminal Font"),
-                    )
-                    .child(
-                        Button::new("font-dropdown")
-                            .label(current_font.clone())
-                            .outline()
-                            .w_full()
-                            .dropdown_menu(move |menu, _, cx| {
-                                let current = cx.theme().font_family.to_string();
-                                let mut menu = menu.min_w(px(200.0));
-                                for font in fonts {
-                                    let is_current = current == font;
-                                    let font_name: SharedString = font.into();
-                                    menu = menu.menu_with_check(
-                                        font,
-                                        is_current,
-                                        Box::new(crate::theme::SwitchFont(font_name)),
-                                    );
-                                }
-                                menu
-                            }),
-                    ),
-            )
-    }
-
-}
-
-/// Toggle the settings dialog (can be called from anywhere)
-pub fn open_settings_dialog(window: &mut Window, cx: &mut App) {
-    use gpui_component::WindowExt;
-
-    // Toggle: close if open, open if closed
-    if window.has_active_dialog(cx) {
-        window.close_dialog(cx);
-        return;
-    }
-
-    window.open_dialog(cx, |dialog, window, cx| {
-        dialog
-            .title("Settings")
-            .w(px(500.0))
-            .child(render_settings_content(window, cx))
-    });
-}
-
-/// Render settings dialog content (standalone version for open_settings_dialog)
-fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
-    use crate::theme::{SwitchFont, SwitchTheme};
-    use gpui_component::theme::ThemeRegistry;
-    use gpui_component::{v_flex, ActiveTheme, StyledExt};
-    use gpui_component::button::Button;
-
-    let current_theme = cx.theme().theme_name().clone();
-    let current_font = cx.theme().font_family.to_string();
-
-    // Common monospace fonts for terminals
-    let fonts = [
-        "Iosevka Nerd Font",
-        "JetBrains Mono",
-        "Fira Code",
-        "SF Mono",
-        "Monaco",
-        "Menlo",
-        "Source Code Pro",
-        "Cascadia Code",
-        "Consolas",
-        "Ubuntu Mono",
-    ];
-
-    v_flex()
-        .gap_4()
-        // Theme selection dropdown
-        .child(
-            v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Theme"),
-                )
-                .child(
-                    Button::new("theme-dropdown")
-                        .label(current_theme.clone())
-                        .outline()
-                        .w_full()
-                        .dropdown_menu(move |menu, _, cx| {
-                            let themes = ThemeRegistry::global(cx).sorted_themes();
-                            let current = cx.theme().theme_name().clone();
-                            let mut menu = menu.min_w(px(200.0));
-                            for theme in themes {
-                                let name = theme.name.clone();
-                                let is_current = current == name;
-                                menu = menu.menu_with_check(
-                                    name.clone(),
-                                    is_current,
-                                    Box::new(SwitchTheme(name)),
-                                );
-                            }
-                            menu
-                        }),
-                ),
-        )
-        // Font family selection dropdown
-        .child(
-            v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Terminal Font"),
-                )
-                .child(
-                    Button::new("font-dropdown")
-                        .label(current_font.clone())
-                        .outline()
-                        .w_full()
-                        .dropdown_menu(move |menu, _, cx| {
-                            let current = cx.theme().font_family.to_string();
-                            let mut menu = menu.min_w(px(200.0));
-                            for font in fonts {
-                                let is_current = current == font;
-                                let font_name: SharedString = font.into();
-                                menu = menu.menu_with_check(
-                                    font,
-                                    is_current,
-                                    Box::new(SwitchFont(font_name)),
-                                );
-                            }
-                            menu
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .pt_2()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("Press Cmd+, to close"),
-        )
 }
 
 impl Workspace {
-    /// Check for and clean up exited panes
+    /// Check for and clean up exited panes (debounced to avoid running every frame)
     fn cleanup_exited_panes(&mut self, cx: &mut Context<Self>) {
+        // Debounce: only run cleanup every CLEANUP_INTERVAL
+        if self.last_cleanup.elapsed() < timing::CLEANUP_INTERVAL {
+            return;
+        }
+        self.last_cleanup = std::time::Instant::now();
+
         let mut tabs_to_remove: Vec<usize> = Vec::new();
 
         for (tab_idx, tab) in self.tabs.iter_mut().enumerate() {
-            // Get all terminals and check for exited ones
-            let terminals = tab.panes.all_terminals();
-            let total_panes = terminals.len();
-            let mut exited_count = 0;
+            // Phase 1: Collect all exited pane IDs (avoid TOCTOU race)
+            let panes = tab.panes.all_panes();
+            let total_panes = panes.len();
+            let exited_pane_ids: Vec<uuid::Uuid> = panes
+                .iter()
+                .filter(|(_, pane)| pane.has_exited(cx))
+                .map(|(id, _)| *id)
+                .collect();
+            let exited_count = exited_pane_ids.len();
 
-            for (pane_id, terminal) in &terminals {
-                if terminal.read(cx).has_exited() {
-                    exited_count += 1;
-                    // Try to remove (only works for non-root panes)
-                    tab.panes.remove(*pane_id);
-                }
+            // Phase 2: Remove all exited panes atomically
+            for pane_id in exited_pane_ids {
+                tab.panes.remove(pane_id);
             }
 
             // If all panes exited, mark tab for removal
@@ -546,7 +398,7 @@ impl Workspace {
                 tabs_to_remove.push(tab_idx);
             } else if exited_count > 0 {
                 // Some panes removed - make sure active pane is valid
-                if tab.panes.find_terminal(tab.active_pane).is_none() {
+                if tab.panes.find_pane(tab.active_pane).is_none() {
                     tab.active_pane = tab.panes.first_leaf_id();
                 }
             }
@@ -572,12 +424,15 @@ impl Render for Workspace {
         // Check for and close exited panes
         self.cleanup_exited_panes(cx);
 
-        // Focus the active terminal in the active pane
+        // Save window bounds if changed
+        self.maybe_save_window_bounds(window);
+
+        // Focus the active pane
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            if let Some(terminal) = tab.panes.find_terminal(tab.active_pane) {
-                let terminal_focus = terminal.read(cx).focus_handle.clone();
-                if !terminal_focus.is_focused(window) {
-                    window.focus(&terminal_focus);
+            if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                let pane_focus = pane.focus_handle(cx);
+                if !pane_focus.is_focused(window) {
+                    window.focus(&pane_focus);
                 }
             }
         }
@@ -590,23 +445,21 @@ impl Render for Workspace {
         let foreground = colors.foreground;
         let muted = colors.muted;
         let tab_active_bg = colors.tab_active;
-        let _tab_inactive_bg = colors.tab_inactive;
         let red = colors.red;
-        let _green = colors.green;
 
         let active_tab_idx = self.active_tab;
         let tab_count = self.tabs.len();
 
         // Pre-compute tab titles (dynamic from terminal or fallback)
-        let tab_titles: Vec<String> = self.tabs.iter().map(|t| t.display_title(cx)).collect();
+        let tab_titles = self.get_tab_titles(cx);
 
         div()
             .size_full()
             .bg(background)
             .flex()
             .flex_col()
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.open_settings(window, cx);
+            .on_action(cx.listener(|_this, _: &OpenSettings, window, cx| {
+                super::settings::toggle_settings_dialog(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Quit, _window, cx| {
                 this.request_quit(cx);
@@ -622,10 +475,7 @@ impl Render for Workspace {
                 // Handle Cmd+Shift combinations first (more specific)
                 if cmd && shift {
                     match key {
-                        "d" | "D" => {
-                            this.split_pane(SplitDirection::Vertical, window, cx);
-                            return; // Don't fall through to Cmd+D
-                        }
+                        "d" | "D" => this.split_pane(SplitDirection::Vertical, window, cx),
                         "]" => this.next_tab(cx),
                         "[" => this.prev_tab(cx),
                         _ => {}
@@ -638,7 +488,7 @@ impl Render for Workspace {
                         "d" => this.split_pane(SplitDirection::Horizontal, window, cx),
                         "}" | "]" => this.next_tab(cx),
                         "{" | "[" => this.prev_tab(cx),
-                        "," => this.open_settings(window, cx),
+                        "," => super::settings::toggle_settings_dialog(window, cx),
                         _ => {}
                     }
                 }
@@ -653,7 +503,7 @@ impl Render for Workspace {
                     .pl(px(78.0))
                     .pr(px(8.0))
                     // Tabs - stuck together, no gaps
-                    .children(self.tabs.iter().enumerate().zip(tab_titles.into_iter()).map(|((i, tab), title)| {
+                    .children(self.tabs.iter().enumerate().zip(tab_titles).map(|((i, tab), title)| {
                         let is_active = i == active_tab_idx;
                         let tab_id = tab.id;
 
@@ -746,8 +596,8 @@ impl Render for Workspace {
                                     .small()
                                     .ghost()
                                     .tooltip("Settings (Cmd+,)")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_settings(window, cx);
+                                    .on_click(cx.listener(|_this, _, window, cx| {
+                                        super::settings::toggle_settings_dialog(window, cx);
                                     })),
                             ),
                     )
@@ -760,7 +610,7 @@ impl Render for Workspace {
                     .h_full()
                     .overflow_hidden()
                     .children(self.tabs.get(self.active_tab).map(|tab| {
-                        tab.panes.render(tab.active_pane, window, cx)
+                        super::pane_group_view::render_pane_tree(&tab.panes, tab.active_pane, window, cx)
                     }))
             )
             // Confirmation dialog overlay

@@ -1,0 +1,67 @@
+{
+  "$schema": "https://raw.githubusercontent.com/longbridgeapp/gpui-component/main/crates/story/themes/schema.json",
+  "name": "High Contrast",
+  "author": "HumanSSH",
+  "themes": [
+    {
+      "name": "High Contrast Dark",
+      "mode": "dark",
+      "colors": {
+        "background": "#000000",
+        "foreground": "#ffffff",
+        "border": "#ffffff",
+        "accent.background": "#ffff00",
+        "accent.foreground": "#000000",
+        "primary.background": "#ffff00",
+        "primary.foreground": "#000000",
+        "secondary.background": "#333333",
+        "secondary.foreground": "#ffffff",
+        "muted.foreground": "#aaaaaa",
+        "title_bar.background": "#000000",
+        "tab.active.background": "#333333",
+        "tab.inactive.background": "#000000",
+        "panel.background": "#000000",
+        "list.active.background": "#333333",
+        "list.hover.background": "#444444",
+        "base.red": "#ff0000",
+        "base.green": "#00ff00",
+        "base.yellow": "#ffff00",
+        "base.blue": "#00ffff",
+        "base.magenta": "#ff00ff",
+        "base.cyan": "#00ffff",
+        "caret": "#ffffff",
+        "selection": "#444444"
+      }
+    },
+    {
+      "name": "High Contrast Light",
+      "mode": "light",
+      "colors": {
+        "background": "#ffffff",
+        "foreground": "#000000",
+        "border": "#000000",
+        "accent.background": "#0000ff",
+        "accent.foreground": "#ffffff",
+        "primary.background": "#0000ff",
+        "primary.foreground": "#ffffff",
+        "secondary.background": "#dddddd",
+        "secondary.foreground": "#000000",
+        "muted.foreground": "#555555",
+        "title_bar.background": "#ffffff",
+        "tab.active.background": "#dddddd",
+        "tab.inactive.background": "#ffffff",
+        "panel.background": "#ffffff",
+        "list.active.background": "#dddddd",
+        "list.hover.background": "#cccccc",
+        "base.red": "#cc0000",
+        "base.green": "#008800",
+        "base.yellow": "#888800",
+        "base.blue": "#0000cc",
+        "base.magenta": "#880088",
+        "base.cyan": "#008888",
+        "caret": "#000000",
+        "selection": "#bbbbbb"
+      }
+    }
+  ]
+}
