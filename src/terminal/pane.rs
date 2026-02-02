@@ -1151,7 +1151,7 @@ impl Render for TerminalPane {
             .track_focus(&focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "," {
-                    crate::app::open_settings_dialog(window, cx);
+                    crate::app::toggle_settings_dialog(window, cx);
                     return;
                 }
                 this.handle_key(event, cx);

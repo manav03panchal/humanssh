@@ -62,3 +62,25 @@ pub mod timing {
     /// PTY polling interval.
     pub const PTY_POLL_INTERVAL: Duration = Duration::from_millis(16);
 }
+
+/// Settings file validation limits.
+pub mod settings {
+    /// Maximum settings file size in bytes (64 KB).
+    /// Settings files should be tiny; anything larger is suspicious.
+    pub const MAX_FILE_SIZE: u64 = 64 * 1024;
+
+    /// Maximum length for string fields (theme name, font family).
+    pub const MAX_STRING_LENGTH: usize = 256;
+
+    /// Window bounds validation limits.
+    pub mod window {
+        /// Minimum window position (allows for off-screen windows on multi-monitor).
+        pub const MIN_POSITION: f32 = -10000.0;
+        /// Maximum window position.
+        pub const MAX_POSITION: f32 = 100000.0;
+        /// Minimum window dimension.
+        pub const MIN_SIZE: f32 = 100.0;
+        /// Maximum window dimension.
+        pub const MAX_SIZE: f32 = 10000.0;
+    }
+}

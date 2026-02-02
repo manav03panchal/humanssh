@@ -14,6 +14,7 @@
 //! cx.dispatch_action(Box::new(SwitchTheme("Catppuccin Latte".into())));
 //! ```
 
+use crate::config::settings::{self, window as window_limits};
 use gpui::{rgb, App, Hsla, SharedString};
 use gpui_component::theme::{Theme, ThemeMode, ThemeRegistry};
 use gpui_component::{ActiveTheme, Colorize};
@@ -62,12 +63,122 @@ fn settings_path() -> Option<PathBuf> {
     })
 }
 
-/// Load settings from disk
+/// Load settings from disk with validation
 fn load_settings() -> Settings {
-    settings_path()
-        .and_then(|path| std::fs::read_to_string(&path).ok())
-        .and_then(|json| serde_json::from_str(&json).ok())
-        .unwrap_or_default()
+    let Some(path) = settings_path() else {
+        return Settings::default();
+    };
+
+    // Check file size before reading (DoS protection)
+    let metadata = match std::fs::metadata(&path) {
+        Ok(m) => m,
+        Err(e) => {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!("Failed to read settings metadata: {}", e);
+            }
+            return Settings::default();
+        }
+    };
+
+    if metadata.len() > settings::MAX_FILE_SIZE {
+        tracing::warn!(
+            "Settings file too large ({} bytes, max {}), ignoring",
+            metadata.len(),
+            settings::MAX_FILE_SIZE
+        );
+        return Settings::default();
+    }
+
+    // Read and parse
+    let json = match std::fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("Failed to read settings file: {}", e);
+            return Settings::default();
+        }
+    };
+
+    let mut parsed: Settings = match serde_json::from_str(&json) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("Failed to parse settings: {}", e);
+            return Settings::default();
+        }
+    };
+
+    // Validate and sanitize
+    parsed.validate();
+    parsed
+}
+
+impl Settings {
+    /// Validate and sanitize settings, replacing invalid values with defaults.
+    fn validate(&mut self) {
+        // Validate theme name length
+        if let Some(ref theme) = self.theme {
+            if theme.len() > settings::MAX_STRING_LENGTH {
+                tracing::warn!(
+                    "Theme name too long ({} chars, max {}), using default",
+                    theme.len(),
+                    settings::MAX_STRING_LENGTH
+                );
+                self.theme = None;
+            }
+        }
+
+        // Validate font family length
+        if let Some(ref font) = self.font_family {
+            if font.len() > settings::MAX_STRING_LENGTH {
+                tracing::warn!(
+                    "Font family too long ({} chars, max {}), using default",
+                    font.len(),
+                    settings::MAX_STRING_LENGTH
+                );
+                self.font_family = None;
+            }
+        }
+
+        // Validate window bounds
+        if let Some(ref mut bounds) = self.window_bounds {
+            bounds.validate();
+        }
+    }
+}
+
+impl WindowBoundsConfig {
+    /// Validate window bounds, clamping to reasonable limits.
+    fn validate(&mut self) {
+        // Clamp position
+        self.x = self
+            .x
+            .clamp(window_limits::MIN_POSITION, window_limits::MAX_POSITION);
+        self.y = self
+            .y
+            .clamp(window_limits::MIN_POSITION, window_limits::MAX_POSITION);
+
+        // Clamp dimensions
+        self.width = self
+            .width
+            .clamp(window_limits::MIN_SIZE, window_limits::MAX_SIZE);
+        self.height = self
+            .height
+            .clamp(window_limits::MIN_SIZE, window_limits::MAX_SIZE);
+
+        // Handle NaN/Infinity by replacing with defaults
+        let defaults = WindowBoundsConfig::default();
+        if !self.x.is_finite() {
+            self.x = defaults.x;
+        }
+        if !self.y.is_finite() {
+            self.y = defaults.y;
+        }
+        if !self.width.is_finite() {
+            self.width = defaults.width;
+        }
+        if !self.height.is_finite() {
+            self.height = defaults.height;
+        }
+    }
 }
 
 /// Save settings to disk
@@ -186,23 +297,52 @@ pub fn init(cx: &mut App) {
     });
 }
 
-/// Find the themes directory
+/// Find the themes directory with path validation.
+/// Returns canonicalized absolute path to prevent path traversal attacks.
 fn find_themes_dir() -> Option<PathBuf> {
+    // Helper to canonicalize and validate a themes directory
+    let validate_themes_dir = |path: PathBuf| -> Option<PathBuf> {
+        // Canonicalize to resolve symlinks and .. components
+        let canonical = path.canonicalize().ok()?;
+
+        // Verify it's actually a directory
+        if !canonical.is_dir() {
+            tracing::warn!("Themes path is not a directory: {:?}", canonical);
+            return None;
+        }
+
+        Some(canonical)
+    };
+
+    // Try CWD-relative themes/
     let cwd_themes = PathBuf::from("themes");
     if cwd_themes.exists() {
-        return Some(cwd_themes);
+        if let Some(path) = validate_themes_dir(cwd_themes) {
+            return Some(path);
+        }
     }
 
+    // Try exe-relative themes/
     if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let exe_themes = exe_dir.join("themes");
-            if exe_themes.exists() {
-                return Some(exe_themes);
+        // Canonicalize exe path first to get real location
+        let exe_canonical = exe_path.canonicalize().ok()?;
+        let exe_dir = exe_canonical.parent()?;
+
+        let exe_themes = exe_dir.join("themes");
+        if exe_themes.exists() {
+            if let Some(path) = validate_themes_dir(exe_themes) {
+                return Some(path);
             }
-            // macOS bundle
-            let bundle_themes = exe_dir.join("../Resources/themes");
+        }
+
+        // macOS bundle: exe is in .app/Contents/MacOS/, themes in .app/Contents/Resources/
+        // Go up to Contents, then into Resources/themes
+        if let Some(contents_dir) = exe_dir.parent() {
+            let bundle_themes = contents_dir.join("Resources").join("themes");
             if bundle_themes.exists() {
-                return Some(bundle_themes);
+                if let Some(path) = validate_themes_dir(bundle_themes) {
+                    return Some(path);
+                }
             }
         }
     }

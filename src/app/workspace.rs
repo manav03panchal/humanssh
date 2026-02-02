@@ -14,7 +14,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::menu::DropdownMenu;
 use gpui_component::theme::ThemeRegistry;
-use gpui_component::{v_flex, ActiveTheme, IconName, Root, Sizable, StyledExt, WindowExt};
+use gpui_component::{ActiveTheme, IconName, Root, Sizable};
 use uuid::Uuid;
 
 /// Pending action requiring confirmation
@@ -365,228 +365,6 @@ impl Workspace {
                 menu
             })
     }
-
-    /// Toggle the settings modal (open if closed, close if open)
-    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // If dialog is already open, close it
-        if window.has_active_dialog(cx) {
-            window.close_dialog(cx);
-            return;
-        }
-
-        window.open_dialog(cx, |dialog, window, cx| {
-            dialog
-                .title("Settings")
-                .w(px(500.0))
-                .child(Self::render_settings_content(window, cx))
-        });
-    }
-
-    /// Render settings dialog content
-    fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let current_theme = cx.theme().theme_name().clone();
-        let current_font = cx.theme().font_family.to_string();
-
-        // Common monospace fonts for terminals
-        let fonts = [
-            "Iosevka Nerd Font",
-            "JetBrains Mono",
-            "Fira Code",
-            "SF Mono",
-            "Monaco",
-            "Menlo",
-            "Source Code Pro",
-            "Cascadia Code",
-            "Consolas",
-            "Ubuntu Mono",
-        ];
-
-        v_flex()
-            .gap_4()
-            // Theme selection
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Theme"),
-                    )
-                    .child(
-                        Button::new("theme-dropdown")
-                            .label(current_theme.clone())
-                            .outline()
-                            .w_full()
-                            .dropdown_menu(move |menu, _, cx| {
-                                let themes = ThemeRegistry::global(cx).sorted_themes();
-                                let current = cx.theme().theme_name().clone();
-                                let mut menu = menu.min_w(px(200.0));
-                                for theme in themes {
-                                    let name = theme.name.clone();
-                                    let is_current = current == name;
-                                    menu = menu.menu_with_check(
-                                        name.clone(),
-                                        is_current,
-                                        Box::new(SwitchTheme(name)),
-                                    );
-                                }
-                                menu
-                            }),
-                    ),
-            )
-            // Font selection
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Terminal Font"),
-                    )
-                    .child(
-                        Button::new("font-dropdown")
-                            .label(current_font.clone())
-                            .outline()
-                            .w_full()
-                            .dropdown_menu(move |menu, _, cx| {
-                                let current = cx.theme().font_family.to_string();
-                                let mut menu = menu.min_w(px(200.0));
-                                for font in fonts {
-                                    let is_current = current == font;
-                                    let font_name: SharedString = font.into();
-                                    menu = menu.menu_with_check(
-                                        font,
-                                        is_current,
-                                        Box::new(crate::theme::SwitchFont(font_name)),
-                                    );
-                                }
-                                menu
-                            }),
-                    ),
-            )
-    }
-}
-
-/// Toggle the settings dialog (can be called from anywhere)
-pub fn open_settings_dialog(window: &mut Window, cx: &mut App) {
-    use gpui_component::WindowExt;
-
-    // Toggle: close if open, open if closed
-    if window.has_active_dialog(cx) {
-        window.close_dialog(cx);
-        return;
-    }
-
-    window.open_dialog(cx, |dialog, window, cx| {
-        dialog
-            .title("Settings")
-            .w(px(500.0))
-            .child(render_settings_content(window, cx))
-    });
-}
-
-/// Render settings dialog content (standalone version for open_settings_dialog)
-fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
-    use crate::theme::{SwitchFont, SwitchTheme};
-    use gpui_component::button::Button;
-    use gpui_component::theme::ThemeRegistry;
-    use gpui_component::{v_flex, ActiveTheme, StyledExt};
-
-    let current_theme = cx.theme().theme_name().clone();
-    let current_font = cx.theme().font_family.to_string();
-
-    // Common monospace fonts for terminals
-    let fonts = [
-        "Iosevka Nerd Font",
-        "JetBrains Mono",
-        "Fira Code",
-        "SF Mono",
-        "Monaco",
-        "Menlo",
-        "Source Code Pro",
-        "Cascadia Code",
-        "Consolas",
-        "Ubuntu Mono",
-    ];
-
-    v_flex()
-        .gap_4()
-        // Theme selection dropdown
-        .child(
-            v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Theme"),
-                )
-                .child(
-                    Button::new("theme-dropdown")
-                        .label(current_theme.clone())
-                        .outline()
-                        .w_full()
-                        .dropdown_menu(move |menu, _, cx| {
-                            let themes = ThemeRegistry::global(cx).sorted_themes();
-                            let current = cx.theme().theme_name().clone();
-                            let mut menu = menu.min_w(px(200.0));
-                            for theme in themes {
-                                let name = theme.name.clone();
-                                let is_current = current == name;
-                                menu = menu.menu_with_check(
-                                    name.clone(),
-                                    is_current,
-                                    Box::new(SwitchTheme(name)),
-                                );
-                            }
-                            menu
-                        }),
-                ),
-        )
-        // Font family selection dropdown
-        .child(
-            v_flex()
-                .gap_2()
-                .child(
-                    div()
-                        .text_sm()
-                        .font_semibold()
-                        .text_color(cx.theme().muted_foreground)
-                        .child("Terminal Font"),
-                )
-                .child(
-                    Button::new("font-dropdown")
-                        .label(current_font.clone())
-                        .outline()
-                        .w_full()
-                        .dropdown_menu(move |menu, _, cx| {
-                            let current = cx.theme().font_family.to_string();
-                            let mut menu = menu.min_w(px(200.0));
-                            for font in fonts {
-                                let is_current = current == font;
-                                let font_name: SharedString = font.into();
-                                menu = menu.menu_with_check(
-                                    font,
-                                    is_current,
-                                    Box::new(SwitchFont(font_name)),
-                                );
-                            }
-                            menu
-                        }),
-                ),
-        )
-        .child(
-            div()
-                .pt_2()
-                .text_xs()
-                .text_color(cx.theme().muted_foreground)
-                .child("Press Cmd+, to close"),
-        )
 }
 
 impl Workspace {
@@ -681,8 +459,8 @@ impl Render for Workspace {
             .bg(background)
             .flex()
             .flex_col()
-            .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
-                this.open_settings(window, cx);
+            .on_action(cx.listener(|_this, _: &OpenSettings, window, cx| {
+                super::settings::toggle_settings_dialog(window, cx);
             }))
             .on_action(cx.listener(|this, _: &Quit, _window, cx| {
                 this.request_quit(cx);
@@ -711,7 +489,7 @@ impl Render for Workspace {
                         "d" => this.split_pane(SplitDirection::Horizontal, window, cx),
                         "}" | "]" => this.next_tab(cx),
                         "{" | "[" => this.prev_tab(cx),
-                        "," => this.open_settings(window, cx),
+                        "," => super::settings::toggle_settings_dialog(window, cx),
                         _ => {}
                     }
                 }
@@ -819,8 +597,8 @@ impl Render for Workspace {
                                     .small()
                                     .ghost()
                                     .tooltip("Settings (Cmd+,)")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_settings(window, cx);
+                                    .on_click(cx.listener(|_this, _, window, cx| {
+                                        super::settings::toggle_settings_dialog(window, cx);
                                     })),
                             ),
                     )
