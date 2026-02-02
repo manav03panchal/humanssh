@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Separated PaneNode tree logic from GPUI rendering (`pane_group_view.rs`)
 - Consolidated display state into RwLock (size, cell_dims, bounds, font_size)
 - Adaptive PTY polling (8ms active, 100ms idle) reduces CPU usage when terminal is idle
+- Row-batched text shaping reduces allocations from O(cells) to O(rows)
+- Bounded PTY output queue (256 messages max) prevents memory exhaustion
+- Cached process detection (500ms TTL) avoids UI thread blocking
+- Validated SHELL environment variable against allowlist (security)
 
 ### Fixed
 - Race condition in process cleanup (TOCTOU fix)

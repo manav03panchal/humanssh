@@ -1142,6 +1142,92 @@ fn create_text_run(len: usize, font_family: &SharedString, fg: Hsla, flags: Cell
     }
 }
 
+/// Shape text by rows (batched) to reduce allocations.
+/// Instead of shaping each character individually (O(cells) allocations),
+/// shapes entire rows (O(rows) allocations).
+fn shape_rows_batched(
+    cells: &[RenderCell],
+    rows: usize,
+    cols: usize,
+    font_family: &SharedString,
+    font_size: Pixels,
+    window: &mut Window,
+) -> Vec<ShapedLine> {
+    // Group cells by row
+    let mut row_cells: Vec<Vec<&RenderCell>> = vec![Vec::new(); rows];
+    for cell in cells {
+        if cell.row < rows {
+            row_cells[cell.row].push(cell);
+        }
+    }
+
+    // Shape each row
+    row_cells
+        .into_iter()
+        .map(|mut row| {
+            if row.is_empty() {
+                // Empty row - shape a single space to maintain line height
+                let run = create_text_run(1, font_family, Hsla::default(), CellFlags::empty());
+                window
+                    .text_system()
+                    .shape_line(" ".into(), font_size, &[run], None)
+            } else {
+                // Sort by column to ensure correct order
+                row.sort_by_key(|c| c.col);
+
+                // Build the row string and runs
+                let mut text = String::with_capacity(cols);
+                let mut runs: Vec<TextRun> = Vec::new();
+
+                let mut current_col = 0;
+                for cell in row {
+                    // Fill gaps with spaces (same style as first cell or default)
+                    while current_col < cell.col {
+                        text.push(' ');
+                        current_col += 1;
+                    }
+
+                    // Add the cell character
+                    let char_len = cell.c.len_utf8();
+
+                    // Check if we can extend the previous run (same style)
+                    let can_extend = runs
+                        .last()
+                        .is_some_and(|last_run| last_run.color == cell.fg);
+
+                    if can_extend {
+                        // Extend previous run
+                        if let Some(last_run) = runs.last_mut() {
+                            last_run.len += char_len;
+                        }
+                    } else {
+                        // Start new run
+                        runs.push(create_text_run(char_len, font_family, cell.fg, cell.flags));
+                    }
+
+                    text.push(cell.c);
+                    current_col = cell.col + 1;
+                }
+
+                // Handle empty text
+                if text.is_empty() {
+                    text.push(' ');
+                    runs.push(create_text_run(
+                        1,
+                        font_family,
+                        Hsla::default(),
+                        CellFlags::empty(),
+                    ));
+                }
+
+                window
+                    .text_system()
+                    .shape_line(text.into(), font_size, &runs, None)
+            }
+        })
+        .collect()
+}
+
 /// Build render data from terminal state - collects individual cells for precise positioning
 fn build_render_data(
     term: &Term<Listener>,
@@ -1466,34 +1552,23 @@ impl Render for TerminalPane {
                         let selection_range = term_guard.renderable_content().selection;
                         drop(term_guard);
 
-                        // Shape each cell individually for precise positioning
+                        // Shape text by row to reduce allocations (O(rows) instead of O(cells))
                         let font_size = px(current_font_size);
-                        let shaped_cells: Vec<_> = render_data
-                            .cells
-                            .iter()
-                            .map(|cell| {
-                                let text_run = create_text_run(
-                                    cell.c.len_utf8(),
-                                    &font_family_clone,
-                                    cell.fg,
-                                    cell.flags,
-                                );
-                                let shaped = window.text_system().shape_line(
-                                    cell.c.to_string().into(),
-                                    font_size,
-                                    &[text_run],
-                                    None,
-                                );
-                                (cell.row, cell.col, shaped)
-                            })
-                            .collect();
+                        let shaped_rows = shape_rows_batched(
+                            &render_data.cells,
+                            rows,
+                            cols,
+                            &font_family_clone,
+                            font_size,
+                            window,
+                        );
 
                         // Use theme selection color with alpha for transparency
                         let selection_color = colors_clone.selection;
 
                         (
                             render_data,
-                            shaped_cells,
+                            shaped_rows,
                             bounds,
                             cell_width,
                             cell_height,
@@ -1502,11 +1577,11 @@ impl Render for TerminalPane {
                             selection_color,
                         )
                     },
-                    // Paint: draw backgrounds and individual cells at exact grid positions
+                    // Paint: draw backgrounds and row-batched text
                     move |_bounds, data, window, cx| {
                         let (
                             render_data,
-                            shaped_cells,
+                            shaped_rows,
                             bounds,
                             cell_width,
                             cell_height,
@@ -1570,11 +1645,11 @@ impl Render for TerminalPane {
                             }
                         }
 
-                        // 2. Paint each cell at its exact grid position
-                        for (row, col, shaped) in &shaped_cells {
-                            let x = origin.x + px(PADDING + *col as f32 * cell_width);
-                            let y = origin.y + px(PADDING + *row as f32 * cell_height);
-                            let _ = shaped.paint(Point::new(x, y), line_height, window, cx);
+                        // 2. Paint each row of text (batched for performance)
+                        for (row_idx, shaped_line) in shaped_rows.iter().enumerate() {
+                            let x = origin.x + px(PADDING);
+                            let y = origin.y + px(PADDING + row_idx as f32 * cell_height);
+                            let _ = shaped_line.paint(Point::new(x, y), line_height, window, cx);
                         }
 
                         // 3. Paint cursor based on shape
