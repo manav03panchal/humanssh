@@ -1419,7 +1419,8 @@ impl Render for TerminalPane {
 
                         // 3. Paint cursor based on shape
                         if let Some(cursor) = render_data.cursor {
-                            let cursor_x = origin.x + px(PADDING + cursor.col as f32 * cell_width);
+                            let cursor_x =
+                                origin.x + px(PADDING + (cursor.col + 1) as f32 * cell_width);
                             let cursor_y = origin.y + px(PADDING + cursor.row as f32 * cell_height);
 
                             match cursor.shape {
