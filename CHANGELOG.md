@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - High contrast theme for accessibility
 - Debug mode via `HUMANSSH_DEBUG` environment variable
 - Window state persistence (position and size saved across sessions)
+- Drag-and-drop support for images (base64 encodes for AI assistants)
+- Drag-and-drop support for files (pastes quoted path)
+- Roadmap section in README documenting planned features
 
 ### Changed
 - Switched from `std::sync::Mutex` to `parking_lot::Mutex` (no poisoning panics)
@@ -25,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Eliminated per-mouse-event string allocations using stack buffer
 - Made process detection portable (Linux `/proc` + macOS `pgrep` fallback)
 - Theme paths now canonicalized to prevent path traversal
+- Split theme.rs into focused modules (persistence, colors, actions)
+- Separated PaneNode tree logic from GPUI rendering (`pane_group_view.rs`)
+- Consolidated display state into RwLock (size, cell_dims, bounds, font_size)
+- Adaptive PTY polling (8ms active, 100ms idle) reduces CPU usage when terminal is idle
 
 ### Fixed
 - Race condition in process cleanup (TOCTOU fix)

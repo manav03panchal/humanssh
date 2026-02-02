@@ -1,6 +1,7 @@
 //! Application module - main workspace container.
 
 mod pane_group;
+mod pane_group_view;
 mod settings;
 mod workspace;
 

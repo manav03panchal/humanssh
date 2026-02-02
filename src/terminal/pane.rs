@@ -15,8 +15,9 @@ use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use base64::Engine;
 use gpui::*;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 
@@ -195,9 +196,38 @@ impl Dimensions for TermSize {
     }
 }
 
+/// Consolidated display state (reduces lock contention by grouping read-heavy fields).
+/// Uses RwLock for better read concurrency since most access is read-only during render.
+#[derive(Clone)]
+struct DisplayState {
+    /// Terminal dimensions in rows/columns
+    size: TermSize,
+    /// Cell dimensions (width, height) - calculated from font metrics
+    cell_dims: (f32, f32),
+    /// Element bounds in window coordinates (for mouse position conversion)
+    bounds: Option<Bounds<Pixels>>,
+    /// Current font size
+    font_size: f32,
+}
+
+impl Default for DisplayState {
+    fn default() -> Self {
+        Self {
+            size: TermSize { cols: 80, rows: 24 },
+            cell_dims: (8.4, 17.0),
+            bounds: None,
+            font_size: DEFAULT_FONT_SIZE,
+        }
+    }
+}
+
 /// Terminal pane that renders a PTY session.
 ///
 /// Manages the PTY process, terminal emulator state, and rendering.
+/// State is organized into groups to minimize lock contention:
+/// - `pty`: Separate mutex for background I/O thread
+/// - `term`/`processor`: Terminal emulation state
+/// - `display`: Read-heavy display state (size, dims, bounds, font) uses RwLock
 pub struct TerminalPane {
     /// PTY process handler for shell communication
     pty: Arc<Mutex<Option<PtyHandler>>>,
@@ -207,14 +237,9 @@ pub struct TerminalPane {
     processor: Arc<Mutex<Processor>>,
     /// Event listener for terminal events (title changes, etc.)
     listener: Listener,
-    /// Terminal dimensions in rows/columns
-    size: Arc<Mutex<TermSize>>,
-    /// Cell dimensions (width, height) - calculated from font metrics
-    cell_dims: Arc<Mutex<(f32, f32)>>,
-    /// Element bounds in window coordinates (for mouse position conversion)
-    bounds: Arc<Mutex<Option<Bounds<Pixels>>>>,
-    /// Current font size
-    font_size: Arc<Mutex<f32>>,
+    /// Consolidated display state (size, cell_dims, bounds, font_size)
+    /// Uses RwLock for better read concurrency during rendering
+    display: Arc<RwLock<DisplayState>>,
     /// Whether we're currently dragging a selection
     dragging: bool,
     /// Focus handle for keyboard input routing
@@ -228,10 +253,8 @@ impl TerminalPane {
     /// starts with default dimensions (80x24) and resizes when rendered.
     pub fn new(cx: &mut Context<Self>) -> Self {
         // Use reasonable defaults - will be resized when layout occurs
-        let cols = 80;
-        let rows = 24;
-
-        let size = TermSize { cols, rows };
+        let display_state = DisplayState::default();
+        let size = display_state.size;
 
         // Create terminal with config and event listener
         let listener = Listener::new();
@@ -241,7 +264,7 @@ impl TerminalPane {
         let processor = Arc::new(Mutex::new(Processor::new()));
 
         // Spawn PTY
-        let (pty, spawn_error) = match PtyHandler::spawn(rows, cols) {
+        let (pty, spawn_error) = match PtyHandler::spawn(size.rows, size.cols) {
             Ok(pty) => (Some(pty), None),
             Err(e) => {
                 tracing::error!("Failed to spawn PTY: {}", e);
@@ -256,11 +279,7 @@ impl TerminalPane {
             term,
             processor,
             listener,
-            size: Arc::new(Mutex::new(size)),
-            // Default cell dims - will be calculated from font metrics on first render
-            cell_dims: Arc::new(Mutex::new((8.4, 17.0))),
-            bounds: Arc::new(Mutex::new(None)),
-            font_size: Arc::new(Mutex::new(DEFAULT_FONT_SIZE)),
+            display: Arc::new(RwLock::new(display_state)),
             dragging: false,
             focus_handle,
         };
@@ -279,38 +298,63 @@ impl TerminalPane {
             processor.advance(&mut *term, error_msg.as_bytes());
         }
 
-        // Start polling for PTY output
+        // Start event-driven PTY output processing with adaptive polling.
+        // Uses short intervals when data is flowing, longer intervals when idle.
+        // This reduces CPU usage from constant 16ms polling to near-zero when idle.
         let term_clone = pane.term.clone();
         let processor_clone = pane.processor.clone();
-
         let pty_clone = pane.pty.clone();
-        cx.spawn(async move |this, cx| loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(16))
-                .await;
 
-            let should_notify = {
-                let pty_guard = pty_clone.lock();
-                if let Some(ref pty) = *pty_guard {
-                    let output_chunks = pty.read_output();
-                    drop(pty_guard);
-                    if !output_chunks.is_empty() {
-                        let mut term = term_clone.lock();
-                        let mut processor = processor_clone.lock();
-                        for chunk in output_chunks {
-                            processor.advance(&mut *term, &chunk);
-                        }
-                        true
-                    } else {
-                        false
-                    }
+        cx.spawn(async move |this, cx| {
+            // Adaptive polling intervals (in ms)
+            const ACTIVE_INTERVAL: u64 = 8; // Fast when data flowing
+            const IDLE_INTERVAL: u64 = 100; // Slow when idle
+            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
+
+            let mut idle_count = 0u32;
+
+            loop {
+                // Choose interval based on recent activity
+                let interval = if idle_count >= IDLE_THRESHOLD {
+                    IDLE_INTERVAL
                 } else {
-                    false
-                }
-            };
+                    ACTIVE_INTERVAL
+                };
 
-            if should_notify {
-                let _ = this.update(cx, |_, cx| cx.notify());
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(interval))
+                    .await;
+
+                let (should_notify, has_data) = {
+                    let pty_guard = pty_clone.lock();
+                    if let Some(ref pty) = *pty_guard {
+                        let output_chunks = pty.read_output();
+                        drop(pty_guard);
+                        if !output_chunks.is_empty() {
+                            let mut term = term_clone.lock();
+                            let mut processor = processor_clone.lock();
+                            for chunk in output_chunks {
+                                processor.advance(&mut *term, &chunk);
+                            }
+                            (true, true)
+                        } else {
+                            (false, false)
+                        }
+                    } else {
+                        (false, false)
+                    }
+                };
+
+                // Update idle tracking
+                if has_data {
+                    idle_count = 0; // Reset on data
+                } else {
+                    idle_count = idle_count.saturating_add(1);
+                }
+
+                if should_notify {
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
             }
         })
         .detach();
@@ -368,9 +412,9 @@ impl TerminalPane {
 
     /// Convert pixel position (window coords) to terminal cell coordinates
     fn pixel_to_cell(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
-        // Get element bounds to convert from window coords to element-local coords
-        let bounds = self.bounds.lock();
-        let bounds = bounds.as_ref()?;
+        // Get display state (single lock for all display-related fields)
+        let display = self.display.read();
+        let bounds = display.bounds.as_ref()?;
 
         let origin_x: f32 = bounds.origin.x.into();
         let origin_y: f32 = bounds.origin.y.into();
@@ -381,14 +425,17 @@ impl TerminalPane {
         let local_x = x - origin_x;
         let local_y = y - origin_y;
 
-        let (cell_width, cell_height) = *self.cell_dims.lock();
+        let (cell_width, cell_height) = display.cell_dims;
 
         // Account for padding
         let cell_x = ((local_x - PADDING) / cell_width).floor() as i32;
         let cell_y = ((local_y - PADDING) / cell_height).floor() as i32;
 
-        let size = self.size.lock();
-        if cell_x >= 0 && cell_y >= 0 && cell_x < size.cols as i32 && cell_y < size.rows as i32 {
+        if cell_x >= 0
+            && cell_y >= 0
+            && cell_x < display.size.cols as i32
+            && cell_y < display.size.rows as i32
+        {
             Some((cell_x as usize, cell_y as usize))
         } else {
             None
@@ -515,7 +562,7 @@ impl TerminalPane {
             *term.mode()
         };
 
-        let (_, cell_height) = *self.cell_dims.lock();
+        let (_, cell_height) = self.display.read().cell_dims;
 
         // If mouse reporting is enabled, send wheel events
         if mode.intersects(
@@ -576,21 +623,21 @@ impl TerminalPane {
                 }
                 "=" | "+" => {
                     // Zoom in (increase font size)
-                    let mut font_size = self.font_size.lock();
-                    *font_size = (*font_size + 1.0).min(MAX_FONT_SIZE);
+                    let mut display = self.display.write();
+                    display.font_size = (display.font_size + 1.0).min(MAX_FONT_SIZE);
                     cx.notify();
                     return;
                 }
                 "-" => {
                     // Zoom out (decrease font size)
-                    let mut font_size = self.font_size.lock();
-                    *font_size = (*font_size - 1.0).max(MIN_FONT_SIZE);
+                    let mut display = self.display.write();
+                    display.font_size = (display.font_size - 1.0).max(MIN_FONT_SIZE);
                     cx.notify();
                     return;
                 }
                 "0" => {
                     // Reset to default font size
-                    *self.font_size.lock() = DEFAULT_FONT_SIZE;
+                    self.display.write().font_size = DEFAULT_FONT_SIZE;
                     cx.notify();
                     return;
                 }
@@ -779,6 +826,90 @@ impl TerminalPane {
     fn copy_selection(&self, cx: &mut Context<Self>) {
         if let Some(text) = self.get_selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Handle dropped files - converts images to base64 data URLs for AI assistants
+    fn handle_file_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
+        let paths = paths.paths();
+        if paths.is_empty() {
+            return;
+        }
+
+        let mut output = String::new();
+
+        for path in paths {
+            // Check if it's an image file by extension
+            let is_image = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| {
+                    matches!(
+                        ext.to_lowercase().as_str(),
+                        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
+                    )
+                })
+                .unwrap_or(false);
+
+            if is_image {
+                // Read and base64 encode image for AI assistants
+                match std::fs::read(path) {
+                    Ok(data) => {
+                        let mime = match path.extension().and_then(|e| e.to_str()) {
+                            Some("png") => "image/png",
+                            Some("jpg") | Some("jpeg") => "image/jpeg",
+                            Some("gif") => "image/gif",
+                            Some("webp") => "image/webp",
+                            Some("bmp") => "image/bmp",
+                            _ => "application/octet-stream",
+                        };
+                        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+                        // Output as data URL (supported by Claude and other AI assistants)
+                        if !output.is_empty() {
+                            output.push(' ');
+                        }
+                        output.push_str(&format!("data:{};base64,{}", mime, encoded));
+                        tracing::info!("Encoded dropped image: {:?} ({} bytes)", path, data.len());
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read dropped file {:?}: {}", path, e);
+                        // Fall back to path
+                        if !output.is_empty() {
+                            output.push(' ');
+                        }
+                        output.push_str(&path.to_string_lossy());
+                    }
+                }
+            } else {
+                // Non-image file: just paste the path
+                if !output.is_empty() {
+                    output.push(' ');
+                }
+                // Quote paths with spaces
+                let path_str = path.to_string_lossy();
+                if path_str.contains(' ') {
+                    output.push('"');
+                    output.push_str(&path_str);
+                    output.push('"');
+                } else {
+                    output.push_str(&path_str);
+                }
+            }
+        }
+
+        if !output.is_empty() {
+            // Use bracketed paste mode if enabled
+            let bracketed_paste = self.term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+            self.term.lock().selection = None;
+
+            if bracketed_paste {
+                self.send_input("\x1b[200~");
+                self.send_input(&output);
+                self.send_input("\x1b[201~");
+            } else {
+                self.send_input(&output);
+            }
+            cx.notify();
         }
     }
 
@@ -1166,25 +1297,27 @@ impl Render for TerminalPane {
 
         // Get theme colors
         let colors = terminal_colors(cx);
-        let size = *self.size.lock();
-        tracing::trace!(rows = size.rows, cols = size.cols, "Terminal render");
+        let display_state = self.display.read();
+        tracing::trace!(
+            rows = display_state.size.rows,
+            cols = display_state.size.cols,
+            "Terminal render"
+        );
         let bg_color = colors.background;
         let font_family: SharedString = FONT_FAMILY.into();
 
-        // Get current font size
-        let current_font_size = *self.font_size.lock();
+        // Get current font size and calculate cell dimensions
+        let current_font_size = display_state.font_size;
+        drop(display_state); // Release read lock before write
 
         // Calculate cell dimensions from actual font metrics
         let (cell_width, cell_height) = get_cell_dimensions(window, current_font_size);
-        *self.cell_dims.lock() = (cell_width, cell_height);
+        self.display.write().cell_dims = (cell_width, cell_height);
 
         // Clone data needed for canvas callbacks (resize happens in prepaint with actual bounds)
         let term = self.term.clone();
         let pty = self.pty.clone();
-        let size = self.size.clone();
-        let cell_dims = self.cell_dims.clone();
-        let bounds_arc = self.bounds.clone();
-        let font_size_arc = self.font_size.clone();
+        let display_arc = self.display.clone();
         let colors_clone = colors;
         let font_family_clone = font_family.clone();
 
@@ -1245,6 +1378,9 @@ impl Render for TerminalPane {
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, _cx| {
                 this.handle_scroll(event);
             }))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
+                this.handle_file_drop(paths, cx);
+            }))
             .size_full()
             .bg(bg_color)
             .child(
@@ -1252,11 +1388,12 @@ impl Render for TerminalPane {
                 canvas(
                     // Prepaint: compute render data and shape individual cells
                     move |bounds, window, _cx| {
-                        // Store bounds for mouse coordinate conversion
-                        *bounds_arc.lock() = Some(bounds);
-
-                        // Get cell dimensions from font metrics
-                        let (cell_width, cell_height) = *cell_dims.lock();
+                        // Get display state and update bounds
+                        let (cell_width, cell_height, current_font_size) = {
+                            let mut display = display_arc.write();
+                            display.bounds = Some(bounds);
+                            (display.cell_dims.0, display.cell_dims.1, display.font_size)
+                        };
 
                         // Calculate terminal size from actual element bounds
                         let bounds_width: f32 = bounds.size.width.into();
@@ -1270,12 +1407,23 @@ impl Render for TerminalPane {
                         let new_rows = new_rows.max(3);
 
                         // Check if resize is needed
-                        let mut size_guard = size.lock();
-                        if new_cols != size_guard.cols || new_rows != size_guard.rows {
-                            size_guard.cols = new_cols;
-                            size_guard.rows = new_rows;
-                            let new_size = *size_guard;
-                            drop(size_guard);
+                        let needs_resize = {
+                            let display = display_arc.read();
+                            new_cols != display.size.cols || new_rows != display.size.rows
+                        };
+
+                        if needs_resize {
+                            // Update display state
+                            {
+                                let mut display = display_arc.write();
+                                display.size.cols = new_cols;
+                                display.size.rows = new_rows;
+                            }
+
+                            let new_size = TermSize {
+                                cols: new_cols,
+                                rows: new_rows,
+                            };
 
                             // Resize PTY
                             {
@@ -1297,15 +1445,13 @@ impl Render for TerminalPane {
                                 let mut term_guard = term.lock();
                                 term_guard.resize(new_size);
                             }
-                        } else {
-                            drop(size_guard);
                         }
 
                         // Get current size for rendering
-                        let size_guard = size.lock();
-                        let cols = size_guard.cols as usize;
-                        let rows = size_guard.rows as usize;
-                        drop(size_guard);
+                        let (cols, rows) = {
+                            let display = display_arc.read();
+                            (display.size.cols as usize, display.size.rows as usize)
+                        };
 
                         // Build render data from terminal state and get selection
                         let term_guard = term.lock();
@@ -1321,7 +1467,6 @@ impl Render for TerminalPane {
                         drop(term_guard);
 
                         // Shape each cell individually for precise positioning
-                        let current_font_size = *font_size_arc.lock();
                         let font_size = px(current_font_size);
                         let shaped_cells: Vec<_> = render_data
                             .cells

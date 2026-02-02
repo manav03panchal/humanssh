@@ -72,6 +72,15 @@ This installs a pre-commit hook that runs:
 | Settings | `Cmd+,` |
 | Quit | `Cmd+Q` |
 
+## Roadmap
+
+Planned features for future releases:
+
+- **SSH Support** - Remote terminal sessions via SSH
+- **Linux/Windows** - Cross-platform support
+- **Profiles** - Save and switch between connection profiles
+- **Serial/Telnet** - Additional connection protocols
+
 ## License
 
 AGPL-3.0-or-later

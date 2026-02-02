@@ -33,9 +33,7 @@
 //! ```
 
 use crate::terminal::TerminalPane;
-use crate::theme::terminal_colors;
-use gpui::prelude::FluentBuilder;
-use gpui::*;
+use gpui::Entity;
 use uuid::Uuid;
 
 /// Direction of a split between two panes.
@@ -207,72 +205,6 @@ impl PaneNode {
             PaneNode::Leaf { .. } => None,
             PaneNode::Split { first, second, .. } => {
                 first.remove(target_id).or_else(|| second.remove(target_id))
-            }
-        }
-    }
-
-    /// Renders the pane tree as a GPUI element.
-    ///
-    /// Recursively builds nested flex containers for splits and terminal views for leaves.
-    /// The active pane is highlighted with an accent border.
-    pub fn render(
-        &self,
-        active_pane: Uuid,
-        _window: &mut Window,
-        cx: &mut Context<'_, super::workspace::Workspace>,
-    ) -> AnyElement {
-        // Get theme colors
-        let colors = terminal_colors(cx);
-        let accent = colors.accent;
-        let border = colors.border;
-
-        match self {
-            PaneNode::Leaf { id, terminal } => {
-                let is_active = *id == active_pane;
-                let pane_id = *id;
-
-                div()
-                    .id(ElementId::Name(format!("pane-{}", id).into()))
-                    .size_full()
-                    .border_1()
-                    .bg(colors.background)
-                    .when(is_active, |d| d.border_color(accent))
-                    .when(!is_active, |d| d.border_color(border))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
-                        this.set_active_pane(pane_id, cx);
-                    }))
-                    .child(terminal.clone())
-                    .into_any_element()
-            }
-            PaneNode::Split {
-                direction,
-                first,
-                second,
-                ratio,
-            } => {
-                let ratio = *ratio;
-
-                let first_elem = first.render(active_pane, _window, cx);
-                let second_elem = second.render(active_pane, _window, cx);
-
-                match direction {
-                    SplitDirection::Horizontal => div()
-                        .size_full()
-                        .flex()
-                        .flex_row()
-                        .child(div().h_full().w(relative(ratio)).child(first_elem))
-                        .child(div().h_full().w(px(2.0)).bg(border))
-                        .child(div().h_full().w(relative(1.0 - ratio)).child(second_elem))
-                        .into_any_element(),
-                    SplitDirection::Vertical => div()
-                        .size_full()
-                        .flex()
-                        .flex_col()
-                        .child(div().w_full().h(relative(ratio)).child(first_elem))
-                        .child(div().w_full().h(px(2.0)).bg(border))
-                        .child(div().w_full().h(relative(1.0 - ratio)).child(second_elem))
-                        .into_any_element(),
-                }
             }
         }
     }

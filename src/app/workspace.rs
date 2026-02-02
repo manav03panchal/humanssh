@@ -612,7 +612,7 @@ impl Render for Workspace {
                     .h_full()
                     .overflow_hidden()
                     .children(self.tabs.get(self.active_tab).map(|tab| {
-                        tab.panes.render(tab.active_pane, window, cx)
+                        super::pane_group_view::render_pane_tree(&tab.panes, tab.active_pane, window, cx)
                     }))
             )
             // Confirmation dialog overlay
