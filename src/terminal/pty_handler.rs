@@ -1,7 +1,7 @@
 //! PTY process management.
 
 use anyhow::{Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, PtyPair, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, PtyPair, PtySize};
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -14,6 +14,7 @@ pub struct PtyHandler {
     writer: Box<dyn Write + Send>,
     output_rx: Receiver<Vec<u8>>,
     exited: Arc<AtomicBool>,
+    child: Box<dyn Child + Send + Sync>,
     _reader_thread: thread::JoinHandle<()>,
 }
 
@@ -38,7 +39,7 @@ impl PtyHandler {
         cmd.env("TERM", "xterm-256color");
 
         // Spawn the shell process
-        let _child = pair
+        let child = pair
             .slave
             .spawn_command(cmd)
             .context("Failed to spawn shell")?;
@@ -84,6 +85,7 @@ impl PtyHandler {
             writer,
             output_rx,
             exited,
+            child,
             _reader_thread: reader_thread,
         })
     }
@@ -121,5 +123,52 @@ impl PtyHandler {
             })
             .context("Failed to resize PTY")?;
         Ok(())
+    }
+
+    /// Check if the shell has any running child processes
+    pub fn has_running_processes(&self) -> bool {
+        // Get the shell's process ID
+        if let Some(pid) = self.child.process_id() {
+            // Use pgrep to check for child processes
+            if let Ok(output) = std::process::Command::new("pgrep")
+                .args(["-P", &pid.to_string()])
+                .output()
+            {
+                // If pgrep returns any output, there are child processes
+                return !output.stdout.is_empty();
+            }
+        }
+        false
+    }
+
+    /// Get the name of any running foreground process (for display in confirmation)
+    pub fn get_running_process_name(&self) -> Option<String> {
+        if let Some(pid) = self.child.process_id() {
+            // Get child PIDs
+            if let Ok(output) = std::process::Command::new("pgrep")
+                .args(["-P", &pid.to_string()])
+                .output()
+            {
+                if !output.stdout.is_empty() {
+                    // Get the first child PID
+                    let child_pids = String::from_utf8_lossy(&output.stdout);
+                    if let Some(child_pid) = child_pids.lines().next() {
+                        // Get the process name using ps
+                        if let Ok(ps_output) = std::process::Command::new("ps")
+                            .args(["-p", child_pid, "-o", "comm="])
+                            .output()
+                        {
+                            let name = String::from_utf8_lossy(&ps_output.stdout)
+                                .trim()
+                                .to_string();
+                            if !name.is_empty() {
+                                return Some(name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }

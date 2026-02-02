@@ -86,17 +86,22 @@ fn open_main_window(cx: &mut App) -> Result<()> {
 
 /// Register keybindings.
 fn register_keybindings(cx: &mut App) {
-    use humanssh::actions::OpenSettings;
+    use humanssh::actions::{OpenSettings, CloseTab};
 
+    // Note: Quit action is handled by Workspace.request_quit() for confirmation
+    // The global handler is a fallback that shouldn't normally trigger
     cx.on_action(|_: &Quit, cx| {
-        info!("Application quit requested");
+        info!("Application quit requested (fallback)");
         cx.quit();
     });
 
     cx.bind_keys([
-        // Quit
+        // Quit (handled by workspace for confirmation)
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("ctrl-q", Quit, None),
+        // Close tab
+        KeyBinding::new("cmd-w", CloseTab, None),
+        KeyBinding::new("ctrl-w", CloseTab, None),
         // Settings
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),

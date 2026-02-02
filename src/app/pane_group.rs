@@ -36,13 +36,14 @@ impl PaneNode {
         }
     }
 
-    /// Find a pane by ID and split it
-    pub fn split(&mut self, target_id: Uuid, direction: SplitDirection, new_terminal: Entity<TerminalPane>) -> bool {
+    /// Find a pane by ID and split it, returns the new pane's ID if successful
+    pub fn split(&mut self, target_id: Uuid, direction: SplitDirection, new_terminal: Entity<TerminalPane>) -> Option<Uuid> {
         match self {
             PaneNode::Leaf { id, terminal } => {
                 if *id == target_id {
                     let old_terminal = terminal.clone();
                     let old_id = *id;
+                    let new_id = Uuid::new_v4();
 
                     *self = PaneNode::Split {
                         direction,
@@ -51,19 +52,19 @@ impl PaneNode {
                             terminal: old_terminal,
                         }),
                         second: Box::new(PaneNode::Leaf {
-                            id: Uuid::new_v4(),
+                            id: new_id,
                             terminal: new_terminal,
                         }),
                         ratio: 0.5,
                     };
-                    true
+                    Some(new_id)
                 } else {
-                    false
+                    None
                 }
             }
             PaneNode::Split { first, second, .. } => {
                 first.split(target_id, direction, new_terminal.clone())
-                    || second.split(target_id, direction, new_terminal)
+                    .or_else(|| second.split(target_id, direction, new_terminal))
             }
         }
     }
@@ -155,7 +156,7 @@ impl PaneNode {
     }
 
     /// Render the pane tree
-    pub fn render(&self, active_pane: Uuid, cx: &mut Context<'_, super::workspace::Workspace>) -> AnyElement {
+    pub fn render(&self, active_pane: Uuid, _window: &mut Window, cx: &mut Context<'_, super::workspace::Workspace>) -> AnyElement {
         // Get theme colors
         let colors = terminal_colors(cx);
         let accent = colors.accent;
@@ -169,7 +170,8 @@ impl PaneNode {
                 div()
                     .id(ElementId::Name(format!("pane-{}", id).into()))
                     .size_full()
-                    .border_2()
+                    .border_1()
+                    .bg(colors.background)
                     .when(is_active, |d| d.border_color(accent))
                     .when(!is_active, |d| d.border_color(border))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
@@ -181,8 +183,8 @@ impl PaneNode {
             PaneNode::Split { direction, first, second, ratio } => {
                 let ratio = *ratio;
 
-                let first_elem = first.render(active_pane, cx);
-                let second_elem = second.render(active_pane, cx);
+                let first_elem = first.render(active_pane, _window, cx);
+                let second_elem = second.render(active_pane, _window, cx);
 
                 match direction {
                     SplitDirection::Horizontal => {
@@ -197,7 +199,6 @@ impl PaneNode {
                                     .child(first_elem)
                             )
                             .child(
-                                // Divider
                                 div()
                                     .h_full()
                                     .w(px(2.0))
@@ -223,7 +224,6 @@ impl PaneNode {
                                     .child(first_elem)
                             )
                             .child(
-                                // Divider
                                 div()
                                     .w_full()
                                     .h(px(2.0))

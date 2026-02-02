@@ -1,7 +1,7 @@
 //! Main workspace - container for tabs and split panes.
 
 use super::pane_group::{PaneNode, SplitDirection};
-use crate::actions::OpenSettings;
+use crate::actions::{OpenSettings, CloseTab, Quit};
 use crate::terminal::TerminalPane;
 use crate::theme::{terminal_colors, SwitchTheme};
 use gpui::prelude::FluentBuilder;
@@ -11,6 +11,14 @@ use gpui_component::menu::DropdownMenu;
 use gpui_component::theme::ThemeRegistry;
 use gpui_component::{v_flex, ActiveTheme, IconName, Root, Sizable, StyledExt, WindowExt};
 use uuid::Uuid;
+
+/// Pending action requiring confirmation
+#[derive(Clone, Copy, PartialEq)]
+enum PendingAction {
+    ClosePane,
+    CloseTab(usize),
+    Quit,
+}
 
 /// A single tab in the workspace
 struct Tab {
@@ -38,6 +46,10 @@ impl Tab {
 pub struct Workspace {
     tabs: Vec<Tab>,
     active_tab: usize,
+    /// Pending action requiring confirmation (shows dialog)
+    pending_action: Option<PendingAction>,
+    /// Process name for confirmation dialog
+    pending_process_name: Option<String>,
 }
 
 impl Workspace {
@@ -56,7 +68,94 @@ impl Workspace {
         Self {
             tabs: vec![tab],
             active_tab: 0,
+            pending_action: None,
+            pending_process_name: None,
         }
+    }
+
+    /// Check if a tab has any running child processes
+    fn tab_has_running_processes(&self, index: usize, cx: &App) -> bool {
+        if let Some(tab) = self.tabs.get(index) {
+            for (_, terminal) in tab.panes.all_terminals() {
+                if terminal.read(cx).has_running_processes() {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Get the name of a running process in a tab (for display)
+    fn get_tab_running_process_name(&self, index: usize, cx: &App) -> Option<String> {
+        if let Some(tab) = self.tabs.get(index) {
+            for (_, terminal) in tab.panes.all_terminals() {
+                if let Some(name) = terminal.read(cx).get_running_process_name() {
+                    return Some(name);
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if any tab has running processes
+    fn any_tab_has_running_processes(&self, cx: &App) -> bool {
+        for i in 0..self.tabs.len() {
+            if self.tab_has_running_processes(i, cx) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get the name of any running process across all tabs
+    fn get_any_running_process_name(&self, cx: &App) -> Option<String> {
+        for i in 0..self.tabs.len() {
+            if let Some(name) = self.get_tab_running_process_name(i, cx) {
+                return Some(name);
+            }
+        }
+        None
+    }
+
+    /// Request to close a tab (with confirmation if needed)
+    fn request_close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.tab_has_running_processes(index, cx) {
+            self.pending_process_name = self.get_tab_running_process_name(index, cx);
+            self.pending_action = Some(PendingAction::CloseTab(index));
+            cx.notify();
+        } else {
+            self.close_tab(index, cx);
+        }
+    }
+
+    /// Request to quit (with confirmation if needed)
+    pub fn request_quit(&mut self, cx: &mut Context<Self>) {
+        if self.any_tab_has_running_processes(cx) {
+            self.pending_process_name = self.get_any_running_process_name(cx);
+            self.pending_action = Some(PendingAction::Quit);
+            cx.notify();
+        } else {
+            cx.quit();
+        }
+    }
+
+    /// Confirm the pending action
+    fn confirm_pending_action(&mut self, cx: &mut Context<Self>) {
+        if let Some(action) = self.pending_action.take() {
+            self.pending_process_name = None;
+            match action {
+                PendingAction::ClosePane => self.do_close_pane(cx),
+                PendingAction::CloseTab(index) => self.close_tab(index, cx),
+                PendingAction::Quit => cx.quit(),
+            }
+        }
+    }
+
+    /// Cancel the pending action
+    fn cancel_pending_action(&mut self, cx: &mut Context<Self>) {
+        self.pending_action = None;
+        self.pending_process_name = None;
+        cx.notify();
     }
 
     fn new_tab(&mut self, cx: &mut Context<Self>) {
@@ -78,6 +177,8 @@ impl Workspace {
 
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.tabs.len() <= 1 {
+            // Last tab - quit the app
+            cx.quit();
             return;
         }
 
@@ -114,10 +215,15 @@ impl Workspace {
     }
 
     /// Split the active pane
-    fn split_pane(&mut self, direction: SplitDirection, cx: &mut Context<Self>) {
+    fn split_pane(&mut self, direction: SplitDirection, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let new_terminal = cx.new(TerminalPane::new);
-            tab.panes.split(tab.active_pane, direction, new_terminal);
+            if let Some(new_pane_id) = tab.panes.split(tab.active_pane, direction, new_terminal.clone()) {
+                // Set the new pane as active
+                tab.active_pane = new_pane_id;
+                // Focus the new terminal
+                new_terminal.read(cx).focus_handle.focus(window);
+            }
             cx.notify();
         }
     }
@@ -130,19 +236,34 @@ impl Workspace {
         }
     }
 
-    /// Close the active pane (or tab if only one pane)
-    fn close_pane(&mut self, cx: &mut Context<Self>) {
+    /// Request to close the active pane (with confirmation if needed)
+    fn request_close_pane(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active_tab) {
+            if let Some(terminal) = tab.panes.find_terminal(tab.active_pane) {
+                if terminal.read(cx).has_running_processes() {
+                    // Show confirmation
+                    self.pending_process_name = terminal.read(cx).get_running_process_name();
+                    self.pending_action = Some(PendingAction::ClosePane);
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        // No confirmation needed
+        self.do_close_pane(cx);
+    }
+
+    /// Actually close the active pane (or tab if only one pane, or quit if last tab)
+    fn do_close_pane(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            // Count panes
             let pane_count = tab.panes.all_terminals().len();
 
             if pane_count <= 1 {
-                // Close the tab instead
+                // Last pane in tab - close the tab
                 self.close_tab(self.active_tab, cx);
             } else {
                 // Remove the pane
                 if tab.panes.remove(tab.active_pane).is_some() {
-                    // Set new active pane
                     tab.active_pane = tab.panes.first_leaf_id();
                     cx.notify();
                 }
@@ -469,9 +590,9 @@ impl Render for Workspace {
         let foreground = colors.foreground;
         let muted = colors.muted;
         let tab_active_bg = colors.tab_active;
-        let tab_inactive_bg = colors.tab_inactive;
+        let _tab_inactive_bg = colors.tab_inactive;
         let red = colors.red;
-        let green = colors.green;
+        let _green = colors.green;
 
         let active_tab_idx = self.active_tab;
         let tab_count = self.tabs.len();
@@ -487,6 +608,12 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &Quit, _window, cx| {
+                this.request_quit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &CloseTab, _window, cx| {
+                this.request_close_pane(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let cmd = event.keystroke.modifiers.platform;
@@ -496,7 +623,7 @@ impl Render for Workspace {
                 if cmd && shift {
                     match key {
                         "d" | "D" => {
-                            this.split_pane(SplitDirection::Vertical, cx);
+                            this.split_pane(SplitDirection::Vertical, window, cx);
                             return; // Don't fall through to Cmd+D
                         }
                         "]" => this.next_tab(cx),
@@ -507,8 +634,8 @@ impl Render for Workspace {
                     // Cmd only (no shift)
                     match key {
                         "t" => this.new_tab(cx),
-                        "w" => this.close_pane(cx),
-                        "d" => this.split_pane(SplitDirection::Horizontal, cx),
+                        "w" => this.request_close_pane(cx),
+                        "d" => this.split_pane(SplitDirection::Horizontal, window, cx),
                         "}" | "]" => this.next_tab(cx),
                         "{" | "[" => this.prev_tab(cx),
                         "," => this.open_settings(window, cx),
@@ -573,7 +700,7 @@ impl Render for Workspace {
                                     .when(tab_count > 1, |d| {
                                         d.on_click(cx.listener(
                                             move |this, _: &ClickEvent, _window, cx| {
-                                                this.close_tab(i, cx);
+                                                this.request_close_tab(i, cx);
                                             },
                                         ))
                                     })
@@ -630,11 +757,99 @@ impl Render for Workspace {
                 div()
                     .flex_1()
                     .w_full()
+                    .h_full()
                     .overflow_hidden()
                     .children(self.tabs.get(self.active_tab).map(|tab| {
-                        tab.panes.render(tab.active_pane, cx)
+                        tab.panes.render(tab.active_pane, window, cx)
                     }))
             )
+            // Confirmation dialog overlay
+            .when(self.pending_action.is_some(), |d| {
+                let action_text = match self.pending_action {
+                    Some(PendingAction::ClosePane) => "close this pane",
+                    Some(PendingAction::CloseTab(_)) => "close this tab",
+                    Some(PendingAction::Quit) => "quit",
+                    None => "",
+                };
+                let process_name = self.pending_process_name.clone().unwrap_or_else(|| "a process".to_string());
+
+                let confirm_label = if self.pending_action == Some(PendingAction::Quit) { "Quit" } else { "Close" };
+                d.child(
+                    // Backdrop
+                    div()
+                        .id("confirm-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.6))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            // Modal container (clickable to cancel)
+                            div()
+                                .id("confirm-modal-container")
+                                .size_full()
+                                .absolute()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.cancel_pending_action(cx);
+                                }))
+                        )
+                        .child(
+                            // Modal
+                            div()
+                                .bg(hsla(0.0, 0.0, 0.12, 1.0))
+                                .border_1()
+                                .border_color(hsla(0.0, 0.0, 0.25, 1.0))
+                                .rounded_xl()
+                                .shadow_lg()
+                                .p_6()
+                                .w(px(420.0))
+                                .flex()
+                                .flex_col()
+                                .gap_5()
+                                .child(
+                                    // Title
+                                    div()
+                                        .text_base()
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(foreground)
+                                        .child(format!("\"{}\" is running", process_name))
+                                )
+                                .child(
+                                    // Message
+                                    div()
+                                        .text_sm()
+                                        .text_color(muted)
+                                        .line_height(px(20.0))
+                                        .child(format!("Are you sure you want to {}? The running process will be terminated.", action_text))
+                                )
+                                .child(
+                                    // Buttons
+                                    div()
+                                        .flex()
+                                        .gap_3()
+                                        .justify_end()
+                                        .mt_2()
+                                        .child(
+                                            Button::new("cancel-btn")
+                                                .label("Cancel")
+                                                .ghost()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.cancel_pending_action(cx);
+                                                }))
+                                        )
+                                        .child(
+                                            Button::new("confirm-btn")
+                                                .label(confirm_label)
+                                                .danger()
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.confirm_pending_action(cx);
+                                                }))
+                                        )
+                                )
+                        )
+                )
+            })
             // Dialog layer - must be rendered for dialogs to appear
             .children(Root::render_dialog_layer(window, cx))
     }
