@@ -65,7 +65,6 @@ panic = "abort"
 [package.metadata.bundle]
 name = "HumanSSH"
 identifier = "com.humancorp.humanssh"
-version = "0.1.0"
 copyright = "Copyright 2025"
 category = "Developer Tools"
 short_description = "A fast, cross-platform SSH terminal"

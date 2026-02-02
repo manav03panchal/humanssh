@@ -5,8 +5,12 @@
 use gpui::*;
 use gpui_component::theme::{Theme, ThemeMode, ThemeRegistry};
 use gpui_component::{ActiveTheme, Colorize};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Cached terminal colors to avoid recomputation every frame
+static TERMINAL_COLORS_CACHE: Mutex<Option<(SharedString, TerminalColors)>> = Mutex::new(None);
 
 /// Settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -17,7 +21,7 @@ struct Settings {
 
 /// Get the settings file path
 fn settings_path() -> Option<PathBuf> {
-    std::env::var("HOME").ok().map(|home| {
+    std::env::var_os("HOME").map(|home| {
         PathBuf::from(home)
             .join(".config")
             .join("humanssh")
@@ -171,14 +175,26 @@ pub struct SwitchFont(pub SharedString);
 #[action(namespace = theme, no_json)]
 pub struct SwitchThemeMode(pub ThemeMode);
 
-/// Get terminal colors from the current theme
+/// Get terminal colors from the current theme (cached)
 /// Maps gpui-component theme colors to terminal ANSI colors
 pub fn terminal_colors(cx: &App) -> TerminalColors {
+    let current_theme = cx.theme().theme_name().clone();
+
+    // Fast path: return cached colors if theme hasn't changed
+    {
+        let cache = TERMINAL_COLORS_CACHE.lock();
+        if let Some((cached_theme, cached_colors)) = cache.as_ref() {
+            if cached_theme == &current_theme {
+                return *cached_colors;
+            }
+        }
+    }
+
+    // Slow path: compute colors and cache them
     let theme = Theme::global(cx);
     let colors = &theme.colors;
 
-    // Map theme colors to terminal ANSI colors
-    TerminalColors {
+    let terminal_colors = TerminalColors {
         background: colors.background,
         foreground: colors.foreground,
         cursor: colors.caret,
@@ -206,7 +222,12 @@ pub fn terminal_colors(cx: &App) -> TerminalColors {
         border: colors.border,
         muted: colors.muted_foreground,
         accent: colors.accent,
-    }
+    };
+
+    // Update cache
+    *TERMINAL_COLORS_CACHE.lock() = Some((current_theme, terminal_colors));
+
+    terminal_colors
 }
 
 /// Terminal color palette mapped from theme

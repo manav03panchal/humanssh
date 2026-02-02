@@ -17,7 +17,7 @@ static STARTUP_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
 /// Initialize required directories.
 fn init_paths() -> Result<()> {
-    let home = std::env::var("HOME").context("HOME environment variable not set")?;
+    let home = std::env::var_os("HOME").context("HOME environment variable not set")?;
     let config_dir = std::path::PathBuf::from(&home)
         .join(".config")
         .join("humanssh");

@@ -48,10 +48,10 @@ fn get_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
 
     // Shape a single 'M' character (full-width in monospace)
     let shaped = window.text_system().shape_line("M".into(), font_size_px, &runs, None);
-    let cell_width: f32 = shaped.width.into();
+    let cell_width = shaped.width.into();
 
     // Use ascent + descent + some line spacing for cell height
-    let cell_height: f32 = font_size * 1.2;
+    let cell_height = font_size * 1.2;
 
     (cell_width, cell_height)
 }
@@ -624,10 +624,8 @@ impl TerminalPane {
         for cell in content.display_iter {
             let row = cell.point.line.0 as usize;
             let col = cell.point.column.0;
-            if row < rows && col < cols {
-                if !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                    grid[row][col] = cell.c;
-                }
+            if row < rows && col < cols && !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                grid[row][col] = cell.c;
             }
         }
         drop(term);
@@ -969,8 +967,8 @@ fn build_render_data(
         }
 
         // Apply cursor styling for block cursor
-        let is_cursor = cursor_info.map_or(false, |c| c.row == row && c.col == col);
-        let is_block_cursor = is_cursor && cursor_info.map_or(false, |c| {
+        let is_cursor = cursor_info.is_some_and(|c| c.row == row && c.col == col);
+        let is_block_cursor = is_cursor && cursor_info.is_some_and(|c| {
             matches!(c.shape, CursorShape::Block | CursorShape::HollowBlock)
         });
         if is_block_cursor {

@@ -14,6 +14,7 @@ pub enum SplitDirection {
 }
 
 /// A pane group node - either a leaf (terminal) or a split (two children)
+#[derive(Clone)]
 pub enum PaneNode {
     Leaf {
         id: Uuid,
@@ -243,19 +244,3 @@ impl PaneNode {
     }
 }
 
-impl Clone for PaneNode {
-    fn clone(&self) -> Self {
-        match self {
-            PaneNode::Leaf { id, terminal } => PaneNode::Leaf {
-                id: *id,
-                terminal: terminal.clone(),
-            },
-            PaneNode::Split { direction, first, second, ratio } => PaneNode::Split {
-                direction: *direction,
-                first: first.clone(),
-                second: second.clone(),
-                ratio: *ratio,
-            },
-        }
-    }
-}

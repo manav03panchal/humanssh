@@ -590,9 +590,7 @@ impl Render for Workspace {
         let foreground = colors.foreground;
         let muted = colors.muted;
         let tab_active_bg = colors.tab_active;
-        let _tab_inactive_bg = colors.tab_inactive;
         let red = colors.red;
-        let _green = colors.green;
 
         let active_tab_idx = self.active_tab;
         let tab_count = self.tabs.len();
@@ -622,10 +620,7 @@ impl Render for Workspace {
                 // Handle Cmd+Shift combinations first (more specific)
                 if cmd && shift {
                     match key {
-                        "d" | "D" => {
-                            this.split_pane(SplitDirection::Vertical, window, cx);
-                            return; // Don't fall through to Cmd+D
-                        }
+                        "d" | "D" => this.split_pane(SplitDirection::Vertical, window, cx),
                         "]" => this.next_tab(cx),
                         "[" => this.prev_tab(cx),
                         _ => {}
@@ -653,7 +648,7 @@ impl Render for Workspace {
                     .pl(px(78.0))
                     .pr(px(8.0))
                     // Tabs - stuck together, no gaps
-                    .children(self.tabs.iter().enumerate().zip(tab_titles.into_iter()).map(|((i, tab), title)| {
+                    .children(self.tabs.iter().enumerate().zip(tab_titles).map(|((i, tab), title)| {
                         let is_active = i == active_tab_idx;
                         let tab_id = tab.id;
 
