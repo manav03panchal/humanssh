@@ -68,6 +68,7 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    /// Create a new workspace with a single tab containing one terminal pane.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let terminal = cx.new(TerminalPane::new);
         let panes = PaneNode::new_leaf(terminal);

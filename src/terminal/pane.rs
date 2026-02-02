@@ -16,9 +16,9 @@ use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
 use gpui::*;
-use parking_lot::Mutex as ParkingMutex;
+use parking_lot::Mutex;
 use std::fmt::Write as FmtWrite;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 // Import centralized configuration
 use crate::config::terminal::{
@@ -27,7 +27,7 @@ use crate::config::terminal::{
 
 /// Cache for cell dimensions to avoid recalculating every frame.
 /// Key is font_size (as bits), value is (width, height).
-static CELL_DIMS_CACHE: ParkingMutex<Option<(u32, f32, f32)>> = ParkingMutex::new(None);
+static CELL_DIMS_CACHE: Mutex<Option<(u32, f32, f32)>> = Mutex::new(None);
 
 /// Calculate cell dimensions from actual font metrics (cached).
 fn get_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
@@ -169,7 +169,7 @@ impl Listener {
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         if let Event::Title(title) = event {
-            *self.title.lock().unwrap() = Some(title);
+            *self.title.lock() = Some(title);
         }
     }
 }
@@ -222,6 +222,10 @@ pub struct TerminalPane {
 }
 
 impl TerminalPane {
+    /// Create a new terminal pane with the user's default shell.
+    ///
+    /// Spawns a PTY process and starts polling for output. The terminal
+    /// starts with default dimensions (80x24) and resizes when rendered.
     pub fn new(cx: &mut Context<Self>) -> Self {
         // Use reasonable defaults - will be resized when layout occurs
         let cols = 80;
@@ -237,11 +241,11 @@ impl TerminalPane {
         let processor = Arc::new(Mutex::new(Processor::new()));
 
         // Spawn PTY
-        let pty = match PtyHandler::spawn(rows, cols) {
-            Ok(pty) => Some(pty),
+        let (pty, spawn_error) = match PtyHandler::spawn(rows, cols) {
+            Ok(pty) => (Some(pty), None),
             Err(e) => {
                 tracing::error!("Failed to spawn PTY: {}", e);
-                None
+                (None, Some(e.to_string()))
             }
         };
 
@@ -261,6 +265,20 @@ impl TerminalPane {
             focus_handle,
         };
 
+        // Display error message in terminal if PTY spawn failed
+        if let Some(error) = spawn_error {
+            let error_msg = format!(
+                "\x1b[31m\x1b[1mError: Failed to spawn shell\x1b[0m\r\n\r\n{}\r\n\r\n\
+                 \x1b[33mTroubleshooting:\x1b[0m\r\n\
+                 - Check that your shell exists: echo $SHELL\r\n\
+                 - Try setting SHELL=/bin/zsh or SHELL=/bin/bash\r\n",
+                error
+            );
+            let mut term = pane.term.lock();
+            let mut processor = pane.processor.lock();
+            processor.advance(&mut *term, error_msg.as_bytes());
+        }
+
         // Start polling for PTY output
         let term_clone = pane.term.clone();
         let processor_clone = pane.processor.clone();
@@ -272,13 +290,13 @@ impl TerminalPane {
                 .await;
 
             let should_notify = {
-                let pty_guard = pty_clone.lock().unwrap();
+                let pty_guard = pty_clone.lock();
                 if let Some(ref pty) = *pty_guard {
                     let output_chunks = pty.read_output();
                     drop(pty_guard);
                     if !output_chunks.is_empty() {
-                        let mut term = term_clone.lock().unwrap();
-                        let mut processor = processor_clone.lock().unwrap();
+                        let mut term = term_clone.lock();
+                        let mut processor = processor_clone.lock();
                         for chunk in output_chunks {
                             processor.advance(&mut *term, &chunk);
                         }
@@ -302,7 +320,7 @@ impl TerminalPane {
 
     /// Send keyboard input to the PTY
     pub fn send_input(&mut self, input: &str) {
-        let mut pty_guard = self.pty.lock().unwrap();
+        let mut pty_guard = self.pty.lock();
         if let Some(ref mut pty) = *pty_guard {
             if let Err(e) = pty.write(input.as_bytes()) {
                 tracing::error!("Failed to write to PTY: {}", e);
@@ -314,7 +332,7 @@ impl TerminalPane {
 
     /// Check if the shell has exited
     pub fn has_exited(&self) -> bool {
-        let pty_guard = self.pty.lock().unwrap();
+        let pty_guard = self.pty.lock();
         match &*pty_guard {
             None => true,
             Some(pty) => pty.has_exited(),
@@ -323,7 +341,7 @@ impl TerminalPane {
 
     /// Check if the terminal has running child processes
     pub fn has_running_processes(&self) -> bool {
-        let pty_guard = self.pty.lock().unwrap();
+        let pty_guard = self.pty.lock();
         match &*pty_guard {
             None => false,
             Some(pty) => pty.has_running_processes(),
@@ -332,7 +350,7 @@ impl TerminalPane {
 
     /// Get the name of any running foreground process
     pub fn get_running_process_name(&self) -> Option<String> {
-        let pty_guard = self.pty.lock().unwrap();
+        let pty_guard = self.pty.lock();
         match &*pty_guard {
             None => None,
             Some(pty) => pty.get_running_process_name(),
@@ -344,15 +362,14 @@ impl TerminalPane {
         self.listener
             .title
             .lock()
-            .unwrap()
             .as_ref()
-            .map(|s| s.clone().into())
+            .map(|s: &String| s.clone().into())
     }
 
     /// Convert pixel position (window coords) to terminal cell coordinates
     fn pixel_to_cell(&self, position: Point<Pixels>) -> Option<(usize, usize)> {
         // Get element bounds to convert from window coords to element-local coords
-        let bounds = self.bounds.lock().unwrap();
+        let bounds = self.bounds.lock();
         let bounds = bounds.as_ref()?;
 
         let origin_x: f32 = bounds.origin.x.into();
@@ -364,13 +381,13 @@ impl TerminalPane {
         let local_x = x - origin_x;
         let local_y = y - origin_y;
 
-        let (cell_width, cell_height) = *self.cell_dims.lock().unwrap();
+        let (cell_width, cell_height) = *self.cell_dims.lock();
 
         // Account for padding
         let cell_x = ((local_x - PADDING) / cell_width).floor() as i32;
         let cell_y = ((local_y - PADDING) / cell_height).floor() as i32;
 
-        let size = self.size.lock().unwrap();
+        let size = self.size.lock();
         if cell_x >= 0 && cell_y >= 0 && cell_x < size.cols as i32 && cell_y < size.rows as i32 {
             Some((cell_x as usize, cell_y as usize))
         } else {
@@ -385,7 +402,7 @@ impl TerminalPane {
         };
 
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
@@ -418,7 +435,7 @@ impl TerminalPane {
             // Start text selection using alacritty's Selection
             let point = TermPoint::new(Line(row as i32), Column(col));
             let selection = TermSelection::new(SelectionType::Simple, point, Side::Left);
-            self.term.lock().unwrap().selection = Some(selection);
+            self.term.lock().selection = Some(selection);
             self.dragging = true;
             cx.notify();
         }
@@ -431,7 +448,7 @@ impl TerminalPane {
         };
 
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
@@ -462,7 +479,7 @@ impl TerminalPane {
             // End text selection
             if self.dragging {
                 let point = TermPoint::new(Line(row as i32), Column(col));
-                if let Some(ref mut selection) = self.term.lock().unwrap().selection {
+                if let Some(ref mut selection) = self.term.lock().selection {
                     selection.update(point, Side::Right);
                 }
                 self.dragging = false;
@@ -480,7 +497,7 @@ impl TerminalPane {
         // Update selection if dragging
         if self.dragging {
             let point = TermPoint::new(Line(row as i32), Column(col));
-            if let Some(ref mut selection) = self.term.lock().unwrap().selection {
+            if let Some(ref mut selection) = self.term.lock().selection {
                 selection.update(point, Side::Right);
             }
             cx.notify();
@@ -494,11 +511,11 @@ impl TerminalPane {
         };
 
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
-        let (_, cell_height) = *self.cell_dims.lock().unwrap();
+        let (_, cell_height) = *self.cell_dims.lock();
 
         // If mouse reporting is enabled, send wheel events
         if mode.intersects(
@@ -535,7 +552,7 @@ impl TerminalPane {
     /// Handle a key event
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let mode = {
-            let term = self.term.lock().unwrap();
+            let term = self.term.lock();
             *term.mode()
         };
 
@@ -559,21 +576,21 @@ impl TerminalPane {
                 }
                 "=" | "+" => {
                     // Zoom in (increase font size)
-                    let mut font_size = self.font_size.lock().unwrap();
+                    let mut font_size = self.font_size.lock();
                     *font_size = (*font_size + 1.0).min(MAX_FONT_SIZE);
                     cx.notify();
                     return;
                 }
                 "-" => {
                     // Zoom out (decrease font size)
-                    let mut font_size = self.font_size.lock().unwrap();
+                    let mut font_size = self.font_size.lock();
                     *font_size = (*font_size - 1.0).max(MIN_FONT_SIZE);
                     cx.notify();
                     return;
                 }
                 "0" => {
                     // Reset to default font size
-                    *self.font_size.lock().unwrap() = DEFAULT_FONT_SIZE;
+                    *self.font_size.lock() = DEFAULT_FONT_SIZE;
                     cx.notify();
                     return;
                 }
@@ -606,7 +623,7 @@ impl TerminalPane {
         let input = match &event.keystroke.key {
             key if key.len() == 1 => {
                 // Clear selection on typing
-                self.term.lock().unwrap().selection = None;
+                self.term.lock().selection = None;
 
                 let c = key.chars().next().unwrap();
 
@@ -632,7 +649,7 @@ impl TerminalPane {
                     "tab" => "\t".to_string(),
                     "escape" => {
                         // Clear selection on escape
-                        self.term.lock().unwrap().selection = None;
+                        self.term.lock().selection = None;
                         cx.notify();
                         "\x1b".to_string()
                     }
@@ -680,7 +697,7 @@ impl TerminalPane {
 
     /// Get selected text from terminal using alacritty's selection
     fn get_selected_text(&self) -> Option<String> {
-        let term = self.term.lock().unwrap();
+        let term = self.term.lock();
         let content = term.renderable_content();
 
         // Get selection range from renderable content
@@ -688,56 +705,68 @@ impl TerminalPane {
         let start = selection_range.start;
         let end = selection_range.end;
 
-        let size = self.size.lock().unwrap();
-        let cols = size.cols as usize;
-        drop(size);
-
-        // Build a grid of characters
-        let rows = term.screen_lines();
-        let mut grid: Vec<Vec<char>> = vec![vec![' '; cols]; rows];
-
-        for cell in content.display_iter {
-            let row = cell.point.line.0 as usize;
-            let col = cell.point.column.0;
-            if row < rows && col < cols && !cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                grid[row][col] = cell.c;
-            }
-        }
-        drop(term);
-
-        // Extract selected text
         let start_row = start.line.0 as usize;
         let start_col = start.column.0;
         let end_row = end.line.0 as usize;
         let end_col = end.column.0;
 
+        // Stream directly from display_iter - no intermediate grid allocation
         let mut result = String::new();
-        for row in start_row..=end_row {
-            if row >= grid.len() {
-                break;
-            }
-            let col_start = if row == start_row { start_col } else { 0 };
-            let col_end = if row == end_row { end_col + 1 } else { cols };
-            let col_end = col_end.min(grid[row].len());
+        let mut current_row = start_row;
+        let mut row_content = String::new();
 
-            for col in col_start..col_end {
-                result.push(grid[row][col]);
+        for cell in content.display_iter {
+            let row = cell.point.line.0 as usize;
+            let col = cell.point.column.0;
+
+            // Skip cells outside selection
+            if row < start_row || row > end_row {
+                continue;
+            }
+            if row == start_row && col < start_col {
+                continue;
+            }
+            if row == end_row && col > end_col {
+                continue;
+            }
+            if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                continue;
             }
 
-            // Add newline between rows (but not after the last row)
-            if row < end_row {
-                // Trim trailing spaces before newline
-                while result.ends_with(' ') {
-                    result.pop();
-                }
+            // Handle row transitions
+            if row != current_row {
+                // Flush previous row (trim trailing spaces, add newline)
+                let trimmed = row_content.trim_end();
+                result.push_str(trimmed);
                 result.push('\n');
+                row_content.clear();
+
+                // Fill gaps if we skipped rows
+                for _ in (current_row + 1)..row {
+                    result.push('\n');
+                }
+                current_row = row;
             }
+
+            // Pad with spaces if we skipped columns
+            let target_col = if row == start_row {
+                col - start_col
+            } else {
+                col
+            };
+            while row_content.chars().count() < target_col {
+                row_content.push(' ');
+            }
+
+            row_content.push(cell.c);
         }
 
-        // Trim trailing spaces
-        while result.ends_with(' ') {
-            result.pop();
-        }
+        // Flush last row
+        let trimmed = row_content.trim_end();
+        result.push_str(trimmed);
+
+        // Trim trailing whitespace from entire result
+        let result = result.trim_end().to_string();
 
         if result.is_empty() {
             None
@@ -753,14 +782,29 @@ impl TerminalPane {
         }
     }
 
-    /// Paste from clipboard
+    /// Paste from clipboard with bracketed paste mode support.
+    /// Wraps pasted content with escape sequences if the terminal has
+    /// bracketed paste mode enabled, preventing paste injection attacks.
     fn paste_clipboard(&mut self, cx: &mut Context<Self>) {
         if let Some(item) = cx.read_from_clipboard() {
             if let Some(text) = item.text() {
                 // Clear selection
-                self.term.lock().unwrap().selection = None;
-                // Paste text to terminal
-                self.send_input(&text);
+                let term_guard = self.term.lock();
+                let bracketed_paste = term_guard.mode().contains(TermMode::BRACKETED_PASTE);
+                drop(term_guard);
+
+                self.term.lock().selection = None;
+
+                // Wrap with bracketed paste escape sequences if mode is enabled
+                if bracketed_paste {
+                    // Start bracketed paste: ESC[200~
+                    self.send_input("\x1b[200~");
+                    self.send_input(&text);
+                    // End bracketed paste: ESC[201~
+                    self.send_input("\x1b[201~");
+                } else {
+                    self.send_input(&text);
+                }
                 cx.notify();
             }
         }
@@ -1122,17 +1166,17 @@ impl Render for TerminalPane {
 
         // Get theme colors
         let colors = terminal_colors(cx);
-        let size = *self.size.lock().unwrap();
+        let size = *self.size.lock();
         tracing::trace!(rows = size.rows, cols = size.cols, "Terminal render");
         let bg_color = colors.background;
         let font_family: SharedString = FONT_FAMILY.into();
 
         // Get current font size
-        let current_font_size = *self.font_size.lock().unwrap();
+        let current_font_size = *self.font_size.lock();
 
         // Calculate cell dimensions from actual font metrics
         let (cell_width, cell_height) = get_cell_dimensions(window, current_font_size);
-        *self.cell_dims.lock().unwrap() = (cell_width, cell_height);
+        *self.cell_dims.lock() = (cell_width, cell_height);
 
         // Clone data needed for canvas callbacks (resize happens in prepaint with actual bounds)
         let term = self.term.clone();
@@ -1209,10 +1253,10 @@ impl Render for TerminalPane {
                     // Prepaint: compute render data and shape individual cells
                     move |bounds, window, _cx| {
                         // Store bounds for mouse coordinate conversion
-                        *bounds_arc.lock().unwrap() = Some(bounds);
+                        *bounds_arc.lock() = Some(bounds);
 
                         // Get cell dimensions from font metrics
-                        let (cell_width, cell_height) = *cell_dims.lock().unwrap();
+                        let (cell_width, cell_height) = *cell_dims.lock();
 
                         // Calculate terminal size from actual element bounds
                         let bounds_width: f32 = bounds.size.width.into();
@@ -1226,7 +1270,7 @@ impl Render for TerminalPane {
                         let new_rows = new_rows.max(3);
 
                         // Check if resize is needed
-                        let mut size_guard = size.lock().unwrap();
+                        let mut size_guard = size.lock();
                         if new_cols != size_guard.cols || new_rows != size_guard.rows {
                             size_guard.cols = new_cols;
                             size_guard.rows = new_rows;
@@ -1234,7 +1278,8 @@ impl Render for TerminalPane {
                             drop(size_guard);
 
                             // Resize PTY
-                            if let Ok(pty_guard) = pty.lock() {
+                            {
+                                let pty_guard = pty.lock();
                                 if let Some(ref pty_inner) = *pty_guard {
                                     if let Err(e) = pty_inner.resize(new_rows, new_cols) {
                                         tracing::error!(
@@ -1248,7 +1293,8 @@ impl Render for TerminalPane {
                             }
 
                             // Resize terminal emulator
-                            if let Ok(mut term_guard) = term.lock() {
+                            {
+                                let mut term_guard = term.lock();
                                 term_guard.resize(new_size);
                             }
                         } else {
@@ -1256,13 +1302,13 @@ impl Render for TerminalPane {
                         }
 
                         // Get current size for rendering
-                        let size_guard = size.lock().unwrap();
+                        let size_guard = size.lock();
                         let cols = size_guard.cols as usize;
                         let rows = size_guard.rows as usize;
                         drop(size_guard);
 
                         // Build render data from terminal state and get selection
-                        let term_guard = term.lock().unwrap();
+                        let term_guard = term.lock();
                         let render_data = build_render_data(
                             &term_guard,
                             &colors_clone,
@@ -1275,7 +1321,7 @@ impl Render for TerminalPane {
                         drop(term_guard);
 
                         // Shape each cell individually for precise positioning
-                        let current_font_size = *font_size_arc.lock().unwrap();
+                        let current_font_size = *font_size_arc.lock();
                         let font_size = px(current_font_size);
                         let shaped_cells: Vec<_> = render_data
                             .cells

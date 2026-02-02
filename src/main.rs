@@ -15,15 +15,14 @@ use tracing::{debug, error, info};
 /// Application startup time for performance monitoring
 static STARTUP_TIME: Lazy<Instant> = Lazy::new(Instant::now);
 
-/// Initialize required directories.
+/// Initialize required directories (cross-platform).
+/// Uses platform-appropriate directories via the `dirs` crate.
 fn init_paths() -> Result<()> {
-    let home = std::env::var_os("HOME").context("HOME environment variable not set")?;
-    let config_dir = std::path::PathBuf::from(&home)
-        .join(".config")
+    let config_dir = dirs::config_dir()
+        .context("Could not determine config directory")?
         .join("humanssh");
-    let data_dir = std::path::PathBuf::from(&home)
-        .join(".local")
-        .join("share")
+    let data_dir = dirs::data_dir()
+        .context("Could not determine data directory")?
         .join("humanssh");
 
     std::fs::create_dir_all(&config_dir)

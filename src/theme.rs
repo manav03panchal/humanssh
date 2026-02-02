@@ -53,14 +53,13 @@ struct Settings {
     window_bounds: Option<WindowBoundsConfig>,
 }
 
-/// Get the settings file path
+/// Get the settings file path (cross-platform).
+/// Uses platform-appropriate config directory:
+/// - Linux: ~/.config/humanssh/settings.json
+/// - macOS: ~/Library/Application Support/humanssh/settings.json
+/// - Windows: C:\Users\<user>\AppData\Roaming\humanssh\settings.json
 fn settings_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join(".config")
-            .join("humanssh")
-            .join("settings.json")
-    })
+    dirs::config_dir().map(|config| config.join("humanssh").join("settings.json"))
 }
 
 /// Load settings from disk with validation
@@ -183,14 +182,31 @@ impl WindowBoundsConfig {
 
 /// Save settings to disk
 fn save_settings(settings: &Settings) {
-    if let Some(path) = settings_path() {
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+    let Some(path) = settings_path() else {
+        tracing::warn!("Could not determine settings path");
+        return;
+    };
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!("Failed to create settings directory: {}", e);
+            return;
         }
-        if let Ok(json) = serde_json::to_string_pretty(settings) {
-            let _ = std::fs::write(&path, json);
+    }
+
+    // Serialize settings
+    let json = match serde_json::to_string_pretty(settings) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("Failed to serialize settings: {}", e);
+            return;
         }
+    };
+
+    // Write to file
+    if let Err(e) = std::fs::write(&path, json) {
+        tracing::warn!("Failed to write settings file: {}", e);
     }
 }
 
@@ -208,16 +224,15 @@ pub fn save_window_bounds(bounds: WindowBoundsConfig) {
 
 /// Initialize theme watching and actions
 pub fn init(cx: &mut App) {
-    // Load saved settings
+    // Load saved settings - take ownership, no cloning
     let saved_settings = load_settings();
     let saved_theme = saved_settings
         .theme
-        .clone()
         .unwrap_or_else(|| "Catppuccin Mocha".to_string());
-    let saved_font = saved_settings.font_family.clone();
+    let saved_font = saved_settings.font_family;
 
-    // Apply saved font family if present
-    if let Some(font_family) = saved_font.clone() {
+    // Apply saved font family if present (consumes the Option)
+    if let Some(font_family) = saved_font {
         Theme::global_mut(cx).font_family = font_family.into();
     }
 
@@ -225,16 +240,17 @@ pub fn init(cx: &mut App) {
     if let Some(themes_dir) = find_themes_dir() {
         tracing::info!("Loading themes from: {:?}", themes_dir);
 
-        let saved_theme_clone = saved_theme.clone();
+        // Clone only once for the closure that outlives this scope
+        let theme_for_closure = saved_theme.clone();
         if let Err(e) = ThemeRegistry::watch_dir(themes_dir, cx, move |cx| {
             // Apply saved theme when themes are loaded
             if let Some(theme) = ThemeRegistry::global(cx)
                 .themes()
-                .get(&saved_theme_clone as &str)
+                .get(&theme_for_closure as &str)
                 .cloned()
             {
                 Theme::global_mut(cx).apply_config(&theme);
-                tracing::info!("Applied saved theme: {}", saved_theme_clone);
+                tracing::info!("Applied saved theme: {}", theme_for_closure);
             } else if let Some(theme) = ThemeRegistry::global(cx)
                 .themes()
                 .get("Catppuccin Mocha")
@@ -268,10 +284,11 @@ pub fn init(cx: &mut App) {
 
         // Preserve existing window bounds when saving theme/font
         let mut settings = load_settings();
-        settings.theme = Some(theme_name.clone());
-        settings.font_family = Some(font_family.clone());
-        save_settings(&settings);
+        // Log before moving into settings to avoid clone
         tracing::debug!("Saved settings: theme={}, font={}", theme_name, font_family);
+        settings.theme = Some(theme_name);
+        settings.font_family = Some(font_family);
+        save_settings(&settings);
     })
     .detach();
 

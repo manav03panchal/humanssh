@@ -8,7 +8,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread;
 
-/// Handles PTY spawning and I/O
+/// Handles PTY spawning and I/O for terminal sessions.
+///
+/// Spawns a pseudo-terminal with the user's default shell and provides
+/// methods for reading output and writing input. Implements `Drop` to
+/// properly clean up the child process when the handler is dropped.
 pub struct PtyHandler {
     pair: PtyPair,
     writer: Box<dyn Write + Send>,
@@ -19,7 +23,17 @@ pub struct PtyHandler {
 }
 
 impl PtyHandler {
-    /// Spawn a new PTY with the user's default shell
+    /// Spawn a new PTY with the user's default shell.
+    ///
+    /// # Arguments
+    /// * `rows` - Initial terminal height in rows
+    /// * `cols` - Initial terminal width in columns
+    ///
+    /// # Returns
+    /// A new `PtyHandler` on success, or an error if spawning failed.
+    ///
+    /// # Shell Selection
+    /// Uses the `SHELL` environment variable. Falls back to `/bin/zsh` if not set.
     pub fn spawn(rows: u16, cols: u16) -> Result<Self> {
         let pty_system = native_pty_system();
 
@@ -252,5 +266,25 @@ impl PtyHandler {
                 Some(name)
             }
         }
+    }
+}
+
+impl Drop for PtyHandler {
+    fn drop(&mut self) {
+        // Signal reader thread to stop by marking as exited
+        self.exited.store(true, Ordering::SeqCst);
+
+        // Kill the child process if still running
+        if let Err(e) = self.child.kill() {
+            // ESRCH (no such process) is expected if already exited
+            tracing::debug!("Kill child process: {}", e);
+        }
+
+        // Wait for child to reap it (avoid zombie)
+        if let Err(e) = self.child.wait() {
+            tracing::debug!("Wait for child process: {}", e);
+        }
+
+        tracing::debug!("PTY handler dropped, child process cleaned up");
     }
 }
