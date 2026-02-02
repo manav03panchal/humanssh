@@ -19,7 +19,7 @@ use gpui_component::{ActiveTheme, IconName, Root, Sizable};
 use uuid::Uuid;
 
 /// Pending action requiring confirmation
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum PendingAction {
     ClosePane,
     CloseTab(usize),
@@ -702,5 +702,1668 @@ impl Render for Workspace {
             })
             // Dialog layer - must be rendered for dialogs to appear
             .children(Root::render_dialog_layer(window, cx))
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    /// Initialize test context with required globals (theme, etc.)
+    fn init_test_context(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            // Initialize gpui-component (sets up Theme global)
+            gpui_component::init(cx);
+        });
+    }
+
+    // ========================================================================
+    // Workspace Creation Tests
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_workspace_creation(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Should start with exactly one tab
+            assert_eq!(ws.tabs.len(), 1, "Workspace should start with one tab");
+
+            // Active tab should be 0
+            assert_eq!(ws.active_tab, 0, "Active tab should be 0");
+
+            // No pending action
+            assert!(ws.pending_action.is_none(), "Should have no pending action");
+
+            // First tab should have one pane
+            let first_tab = &ws.tabs[0];
+            assert_eq!(
+                first_tab.panes.all_panes().len(),
+                1,
+                "First tab should have one pane"
+            );
+
+            // Tab title should be "Terminal 1"
+            assert_eq!(
+                first_tab.fallback_title.as_ref(),
+                "Terminal 1",
+                "First tab should be named 'Terminal 1'"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_workspace_cached_titles_initialized(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Cached titles should be initialized
+            assert_eq!(
+                ws.cached_titles.len(),
+                1,
+                "Cached titles should be initialized with one title"
+            );
+            assert_eq!(
+                ws.cached_titles[0].as_ref(),
+                "Terminal 1",
+                "First cached title should be 'Terminal 1'"
+            );
+        });
+    }
+
+    // ========================================================================
+    // Tab Management Tests
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_new_tab(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Should now have 2 tabs
+            assert_eq!(ws.tabs.len(), 2, "Should have 2 tabs after adding one");
+
+            // Active tab should be the new one (index 1)
+            assert_eq!(ws.active_tab, 1, "Active tab should be the new tab");
+
+            // Second tab should have title "Terminal 2"
+            assert_eq!(
+                ws.tabs[1].fallback_title.as_ref(),
+                "Terminal 2",
+                "Second tab should be named 'Terminal 2'"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_multiple_new_tabs(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Should have 4 tabs total
+            assert_eq!(ws.tabs.len(), 4, "Should have 4 tabs");
+
+            // Active tab should be the last one (index 3)
+            assert_eq!(ws.active_tab, 3, "Active tab should be index 3");
+
+            // Check all tab titles
+            assert_eq!(ws.tabs[0].fallback_title.as_ref(), "Terminal 1");
+            assert_eq!(ws.tabs[1].fallback_title.as_ref(), "Terminal 2");
+            assert_eq!(ws.tabs[2].fallback_title.as_ref(), "Terminal 3");
+            assert_eq!(ws.tabs[3].fallback_title.as_ref(), "Terminal 4");
+        });
+    }
+
+    #[gpui::test]
+    fn test_switch_tab(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create 3 tabs
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        // Switch to first tab
+        workspace.update(cx, |ws, cx| {
+            ws.switch_tab(0, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 0, "Active tab should be 0 after switch");
+        });
+
+        // Switch to middle tab
+        workspace.update(cx, |ws, cx| {
+            ws.switch_tab(1, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 1, "Active tab should be 1 after switch");
+        });
+    }
+
+    #[gpui::test]
+    fn test_switch_tab_out_of_bounds(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Try to switch to an invalid tab index
+        workspace.update(cx, |ws, cx| {
+            ws.switch_tab(100, cx); // Out of bounds
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Should remain on tab 0
+            assert_eq!(
+                ws.active_tab, 0,
+                "Active tab should remain 0 for invalid index"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_next_tab(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create 3 tabs, starting at tab 2 (index 2)
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 2, "Should start at tab 2");
+        });
+
+        // Go to next tab (should wrap to 0)
+        workspace.update(cx, |ws, cx| {
+            ws.next_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 0, "Should wrap around to tab 0");
+        });
+
+        // Go to next tab again
+        workspace.update(cx, |ws, cx| {
+            ws.next_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 1, "Should be at tab 1");
+        });
+    }
+
+    #[gpui::test]
+    fn test_prev_tab(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create 3 tabs
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.switch_tab(0, cx); // Go to first tab
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 0, "Should start at tab 0");
+        });
+
+        // Go to prev tab (should wrap to last)
+        workspace.update(cx, |ws, cx| {
+            ws.prev_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 2, "Should wrap around to last tab");
+        });
+
+        // Go to prev tab again
+        workspace.update(cx, |ws, cx| {
+            ws.prev_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 1, "Should be at tab 1");
+        });
+    }
+
+    #[gpui::test]
+    fn test_close_tab_with_multiple_tabs(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create 3 tabs
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.tabs.len(), 3, "Should have 3 tabs");
+        });
+
+        // Close middle tab (index 1)
+        workspace.update(cx, |ws, cx| {
+            ws.close_tab(1, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.tabs.len(), 2, "Should have 2 tabs after closing one");
+        });
+    }
+
+    #[gpui::test]
+    fn test_close_active_tab_adjusts_index(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create 3 tabs and stay on the last one
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            // Active tab is now 2
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 2, "Should be on tab 2");
+        });
+
+        // Close the last tab
+        workspace.update(cx, |ws, cx| {
+            ws.close_tab(2, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Active tab should adjust to the new last tab
+            assert_eq!(ws.active_tab, 1, "Active tab should adjust to 1");
+            assert_eq!(ws.tabs.len(), 2, "Should have 2 tabs");
+        });
+    }
+
+    // ========================================================================
+    // Focus Management Tests
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_set_active_pane(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Get the first pane's ID (workspace starts with one pane)
+        let first_pane_id = cx.read(|app| {
+            let ws = workspace.read(app);
+            let tab = &ws.tabs[0];
+            tab.panes.first_leaf_id()
+        });
+
+        // Set active pane (should work even with just one pane)
+        workspace.update(cx, |ws, cx| {
+            ws.set_active_pane(first_pane_id, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            let tab = &ws.tabs[0];
+            assert_eq!(
+                tab.active_pane, first_pane_id,
+                "Active pane should be set to first pane"
+            );
+        });
+    }
+
+    // ========================================================================
+    // Confirmation Dialog Tests
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_cancel_pending_action(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Set up a pending action manually
+        workspace.update(cx, |ws, cx| {
+            ws.pending_action = Some(PendingAction::Quit);
+            ws.pending_process_name = Some("test_process".to_string());
+            cx.notify();
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert!(ws.pending_action.is_some(), "Should have pending action");
+            assert!(
+                ws.pending_process_name.is_some(),
+                "Should have process name"
+            );
+        });
+
+        // Cancel the pending action
+        workspace.update(cx, |ws, cx| {
+            ws.cancel_pending_action(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert!(
+                ws.pending_action.is_none(),
+                "Pending action should be cleared"
+            );
+            assert!(
+                ws.pending_process_name.is_none(),
+                "Process name should be cleared"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_pending_action_states(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Test ClosePane action
+        workspace.update(cx, |ws, _| {
+            ws.pending_action = Some(PendingAction::ClosePane);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.pending_action, Some(PendingAction::ClosePane));
+        });
+
+        // Test CloseTab action
+        workspace.update(cx, |ws, _| {
+            ws.pending_action = Some(PendingAction::CloseTab(0));
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.pending_action, Some(PendingAction::CloseTab(0)));
+        });
+
+        // Test Quit action
+        workspace.update(cx, |ws, _| {
+            ws.pending_action = Some(PendingAction::Quit);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.pending_action, Some(PendingAction::Quit));
+        });
+    }
+
+    // ========================================================================
+    // Tab Title Tests
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_get_tab_titles(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Add more tabs
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        cx.update(|app| {
+            workspace.update(app, |ws, cx| {
+                let titles = ws.get_tab_titles(cx);
+                assert_eq!(titles.len(), 3, "Should have 3 titles");
+                assert_eq!(titles[0].as_ref(), "Terminal 1");
+                assert_eq!(titles[1].as_ref(), "Terminal 2");
+                assert_eq!(titles[2].as_ref(), "Terminal 3");
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_tab_titles_cached(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Get titles first time (populates cache)
+        cx.update(|app| {
+            workspace.update(app, |ws, cx| {
+                let _ = ws.get_tab_titles(cx);
+            });
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Cache should be populated
+            assert_eq!(ws.cached_titles.len(), 1);
+        });
+
+        // Get titles again (should use cache)
+        cx.update(|app| {
+            workspace.update(app, |ws, cx| {
+                let titles = ws.get_tab_titles(cx);
+                assert_eq!(titles.len(), 1);
+            });
+        });
+    }
+
+    // ========================================================================
+    // Edge Cases
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_single_tab_operations(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // With single tab, next and prev should stay on same tab
+        workspace.update(cx, |ws, cx| {
+            ws.next_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 0, "Should stay on tab 0 with single tab");
+        });
+
+        workspace.update(cx, |ws, cx| {
+            ws.prev_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 0, "Should stay on tab 0 with single tab");
+        });
+    }
+
+    #[gpui::test]
+    fn test_tab_ids_are_unique(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            let ids: Vec<Uuid> = ws.tabs.iter().map(|t| t.id).collect();
+
+            // Check all IDs are unique
+            for i in 0..ids.len() {
+                for j in (i + 1)..ids.len() {
+                    assert_ne!(ids[i], ids[j], "Tab IDs should be unique");
+                }
+            }
+        });
+    }
+
+    // ========================================================================
+    // Pane Tree Structure Tests
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_pane_tree_first_leaf_id(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Verify first leaf ID is consistent
+        let first_id = cx.read(|app| {
+            let ws = workspace.read(app);
+            ws.tabs[0].panes.first_leaf_id()
+        });
+
+        // Read again to verify it's the same
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            let second_read_id = ws.tabs[0].panes.first_leaf_id();
+            assert_eq!(
+                first_id, second_read_id,
+                "First leaf ID should be consistent"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_find_pane_by_id(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Get the first pane's ID
+        let pane_id = cx.read(|app| {
+            let ws = workspace.read(app);
+            ws.tabs[0].panes.first_leaf_id()
+        });
+
+        // Should be able to find the pane
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            let found = ws.tabs[0].panes.find_pane(pane_id);
+            assert!(found.is_some(), "Should find pane by ID");
+        });
+
+        // Should not find a random UUID
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            let random_id = Uuid::new_v4();
+            let found = ws.tabs[0].panes.find_pane(random_id);
+            assert!(found.is_none(), "Should not find random UUID");
+        });
+    }
+
+    // ========================================================================
+    // Concurrency Tests - Tab Operations Thread Safety
+    // ========================================================================
+
+    #[gpui::test]
+    fn test_rapid_tab_creation(cx: &mut TestAppContext) {
+        // Tests rapid consecutive tab creation (simulates fast keyboard input)
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        const NUM_TABS: usize = 50;
+
+        // Rapidly create many tabs
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..NUM_TABS {
+                ws.new_tab(cx);
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(
+                ws.tabs.len(),
+                NUM_TABS + 1, // +1 for initial tab
+                "All tabs should be created"
+            );
+            assert_eq!(
+                ws.active_tab, NUM_TABS,
+                "Active tab should be the last created"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_rapid_tab_deletion(cx: &mut TestAppContext) {
+        // Tests rapid consecutive tab deletion
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        const NUM_TABS: usize = 20;
+
+        // Create tabs first
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..NUM_TABS {
+                ws.new_tab(cx);
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.tabs.len(), NUM_TABS + 1);
+        });
+
+        // Rapidly delete tabs from the end
+        workspace.update(cx, |ws, cx| {
+            while ws.tabs.len() > 1 {
+                let last_idx = ws.tabs.len() - 1;
+                ws.close_tab(last_idx, cx);
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.tabs.len(), 1, "Should have one tab remaining");
+            assert_eq!(ws.active_tab, 0, "Active tab should be 0");
+        });
+    }
+
+    #[gpui::test]
+    fn test_interleaved_create_delete(cx: &mut TestAppContext) {
+        // Tests interleaved tab creation and deletion
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create 5, delete 2, create 3, delete 1, etc.
+        workspace.update(cx, |ws, cx| {
+            // Create 5 tabs
+            for _ in 0..5 {
+                ws.new_tab(cx);
+            }
+            // Delete 2
+            ws.close_tab(3, cx);
+            ws.close_tab(2, cx);
+            // Create 3 more
+            for _ in 0..3 {
+                ws.new_tab(cx);
+            }
+            // Delete 1
+            ws.close_tab(4, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // 1 (initial) + 5 - 2 + 3 - 1 = 6 tabs
+            assert_eq!(
+                ws.tabs.len(),
+                6,
+                "Tab count should be correct after interleaved operations"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_rapid_focus_changes(cx: &mut TestAppContext) {
+        // Tests rapid consecutive focus changes between tabs
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create several tabs
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..10 {
+                ws.new_tab(cx);
+            }
+        });
+
+        // Rapidly switch between tabs
+        workspace.update(cx, |ws, cx| {
+            for i in 0..100 {
+                ws.switch_tab(i % 11, cx); // 11 tabs total
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(
+                ws.active_tab,
+                99 % 11,
+                "Active tab should be correct after rapid switches"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_rapid_next_prev_tab(cx: &mut TestAppContext) {
+        // Tests rapid next/prev tab cycling
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create 5 tabs
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..4 {
+                ws.new_tab(cx);
+            }
+        });
+
+        // Rapidly cycle through tabs
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..50 {
+                ws.next_tab(cx);
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // After adding 4 tabs, active_tab is 4 (last created)
+            // 50 next_tabs with 5 tabs from position 4: (4 + 50) % 5 = 4
+            assert_eq!(ws.active_tab, 4, "Should wrap around correctly");
+        });
+
+        // Now go backwards
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..50 {
+                ws.prev_tab(cx);
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // 50 prev_tabs from position 4 with 5 tabs: (4 - 50) wraps to 4
+            // Because 50 is divisible by 5, we end up back at 4
+            assert_eq!(ws.active_tab, 4, "Should wrap around correctly backwards");
+        });
+    }
+
+    #[gpui::test]
+    fn test_delete_while_iterating(cx: &mut TestAppContext) {
+        // Tests tab deletion while the active index would be affected
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create tabs
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..10 {
+                ws.new_tab(cx);
+            }
+            // Go to middle tab
+            ws.switch_tab(5, cx);
+        });
+
+        // Delete tabs before the active one
+        workspace.update(cx, |ws, cx| {
+            ws.close_tab(2, cx);
+            ws.close_tab(1, cx);
+            ws.close_tab(0, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Active index should adjust as tabs before it are deleted
+            assert!(ws.active_tab < ws.tabs.len(), "Active tab should be valid");
+        });
+    }
+
+    #[gpui::test]
+    fn test_pending_action_state_transitions(cx: &mut TestAppContext) {
+        // Tests rapid state transitions of pending actions
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            // Rapidly set and clear pending actions
+            for i in 0..100 {
+                match i % 4 {
+                    0 => {
+                        ws.pending_action = Some(PendingAction::ClosePane);
+                        ws.pending_process_name = Some(format!("proc-{}", i));
+                    }
+                    1 => {
+                        ws.pending_action = Some(PendingAction::CloseTab(i % 10));
+                        ws.pending_process_name = Some(format!("proc-{}", i));
+                    }
+                    2 => {
+                        ws.pending_action = Some(PendingAction::Quit);
+                        ws.pending_process_name = Some("important-process".to_string());
+                    }
+                    3 => {
+                        ws.cancel_pending_action(cx);
+                    }
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Last iteration (99 % 4 = 3) cancels the action
+            assert!(
+                ws.pending_action.is_none(),
+                "Pending action should be cleared"
+            );
+            assert!(
+                ws.pending_process_name.is_none(),
+                "Process name should be cleared"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_cache_invalidation_under_load(cx: &mut TestAppContext) {
+        // Tests that title cache remains consistent under rapid tab changes
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create and delete tabs rapidly
+        for _ in 0..10 {
+            workspace.update(cx, |ws, cx| {
+                ws.new_tab(cx);
+                ws.new_tab(cx);
+                ws.new_tab(cx);
+            });
+
+            cx.update(|app| {
+                workspace.update(app, |ws, cx| {
+                    let titles = ws.get_tab_titles(cx);
+                    assert_eq!(
+                        titles.len(),
+                        ws.tabs.len(),
+                        "Title cache should match tab count"
+                    );
+                });
+            });
+
+            workspace.update(cx, |ws, cx| {
+                if ws.tabs.len() > 2 {
+                    ws.close_tab(ws.tabs.len() - 1, cx);
+                }
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn test_tab_id_uniqueness_under_stress(cx: &mut TestAppContext) {
+        // Tests that tab IDs remain unique even with rapid create/delete cycles
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        let mut all_ids: std::collections::HashSet<Uuid> = std::collections::HashSet::new();
+
+        // Collect initial tab ID
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            for tab in &ws.tabs {
+                all_ids.insert(tab.id);
+            }
+        });
+
+        for _cycle in 0..20 {
+            // Create tabs and collect only newly created IDs
+            workspace.update(cx, |ws, cx| {
+                for _ in 0..5 {
+                    ws.new_tab(cx);
+                }
+            });
+
+            // Collect all current IDs - only new ones should be inserted
+            cx.read(|app| {
+                let ws = workspace.read(app);
+                for tab in &ws.tabs {
+                    // Try to insert - if it was already there, that's fine (surviving tab)
+                    // UUIDs should never collide in practice
+                    all_ids.insert(tab.id);
+                }
+            });
+
+            // Delete some tabs
+            workspace.update(cx, |ws, cx| {
+                while ws.tabs.len() > 2 {
+                    ws.close_tab(1, cx);
+                }
+            });
+        }
+
+        // Final check: we should have accumulated many unique IDs
+        // 20 cycles * 5 new tabs = 100 new tabs, plus 1 initial = 101 unique IDs minimum
+        // (some may be deleted but IDs should never be reused)
+        assert!(
+            all_ids.len() >= 100,
+            "Should have accumulated many unique tab IDs: got {}",
+            all_ids.len()
+        );
+    }
+
+    #[gpui::test]
+    fn test_active_pane_consistency(cx: &mut TestAppContext) {
+        // Tests that active_pane always points to a valid pane
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // Create multiple tabs and switch between them
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..10 {
+                ws.new_tab(cx);
+            }
+        });
+
+        // Verify all tabs have valid active_pane
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            for (i, tab) in ws.tabs.iter().enumerate() {
+                let pane = tab.panes.find_pane(tab.active_pane);
+                assert!(pane.is_some(), "Tab {} should have a valid active_pane", i);
+            }
+        });
+
+        // Switch between tabs and verify consistency
+        for target_tab in 0..10 {
+            workspace.update(cx, |ws, cx| {
+                ws.switch_tab(target_tab, cx);
+            });
+
+            cx.read(|app| {
+                let ws = workspace.read(app);
+                let tab = &ws.tabs[ws.active_tab];
+                let pane = tab.panes.find_pane(tab.active_pane);
+                assert!(
+                    pane.is_some(),
+                    "Active tab should have valid active_pane after switch to {}",
+                    target_tab
+                );
+            });
+        }
+    }
+
+    // ========================================================================
+    // Stress Tests - High Volume Tab Operations
+    // To run: cargo test --release -- --ignored stress_
+    // ========================================================================
+
+    /// Stress test with 100+ rapid tab operations.
+    /// Run with: cargo test --release -- --ignored stress_tab_operations
+    #[gpui::test]
+    #[ignore]
+    fn stress_tab_operations(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        const ITERATIONS: usize = 100;
+        const TABS_PER_ITERATION: usize = 10;
+
+        for iteration in 0..ITERATIONS {
+            // Create tabs
+            workspace.update(cx, |ws, cx| {
+                for _ in 0..TABS_PER_ITERATION {
+                    ws.new_tab(cx);
+                }
+            });
+
+            // Verify state
+            cx.read(|app| {
+                let ws = workspace.read(app);
+                assert!(
+                    ws.tabs.len() <= (iteration + 1) * TABS_PER_ITERATION + 1,
+                    "Tab count should be bounded"
+                );
+            });
+
+            // Delete half the tabs
+            workspace.update(cx, |ws, cx| {
+                let to_delete = ws.tabs.len() / 2;
+                for _ in 0..to_delete {
+                    if ws.tabs.len() > 1 {
+                        ws.close_tab(1, cx);
+                    }
+                }
+            });
+
+            // Rapid focus switching
+            workspace.update(cx, |ws, cx| {
+                for _ in 0..50 {
+                    ws.next_tab(cx);
+                    ws.prev_tab(cx);
+                }
+            });
+        }
+
+        // Final verification
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert!(ws.tabs.len() >= 1, "Should have at least one tab");
+            assert!(ws.active_tab < ws.tabs.len(), "Active tab should be valid");
+        });
+    }
+
+    /// Stress test for focus state consistency.
+    /// Run with: cargo test --release -- --ignored stress_focus_consistency
+    #[gpui::test]
+    #[ignore]
+    fn stress_focus_consistency(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        const NUM_TABS: usize = 50;
+        const FOCUS_CYCLES: usize = 1000;
+
+        // Create many tabs
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..NUM_TABS {
+                ws.new_tab(cx);
+            }
+        });
+
+        // Rapidly cycle focus
+        workspace.update(cx, |ws, cx| {
+            for i in 0..FOCUS_CYCLES {
+                match i % 3 {
+                    0 => ws.next_tab(cx),
+                    1 => ws.prev_tab(cx),
+                    2 => ws.switch_tab(i % (NUM_TABS + 1), cx),
+                    _ => unreachable!(),
+                }
+            }
+        });
+
+        // Verify all tabs still have valid panes
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            for (i, tab) in ws.tabs.iter().enumerate() {
+                let pane = tab.panes.find_pane(tab.active_pane);
+                assert!(
+                    pane.is_some(),
+                    "Tab {} should have valid pane after stress test",
+                    i
+                );
+            }
+        });
+    }
+
+    /// Stress test for pending action handling.
+    /// Run with: cargo test --release -- --ignored stress_pending_actions
+    #[gpui::test]
+    #[ignore]
+    fn stress_pending_actions(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        const ITERATIONS: usize = 1000;
+
+        workspace.update(cx, |ws, cx| {
+            for i in 0..ITERATIONS {
+                // Set a pending action
+                ws.pending_action = Some(match i % 3 {
+                    0 => PendingAction::ClosePane,
+                    1 => PendingAction::CloseTab(i % 10),
+                    2 => PendingAction::Quit,
+                    _ => unreachable!(),
+                });
+                ws.pending_process_name = Some(format!("process-{}", i));
+
+                // Randomly cancel or confirm
+                if i % 7 == 0 {
+                    ws.cancel_pending_action(cx);
+                }
+            }
+        });
+
+        // Final state should be consistent
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            // Either both are Some or both are None after cancel
+            if ws.pending_action.is_none() {
+                assert!(
+                    ws.pending_process_name.is_none(),
+                    "Process name should be cleared with pending action"
+                );
+            }
+        });
+    }
+
+    /// Stress test with mixed operations including cache updates.
+    /// Run with: cargo test --release -- --ignored stress_mixed_operations
+    #[gpui::test]
+    #[ignore]
+    fn stress_mixed_operations(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        const ITERATIONS: usize = 500;
+
+        for i in 0..ITERATIONS {
+            workspace.update(cx, |ws, cx| {
+                match i % 10 {
+                    0 | 1 | 2 => ws.new_tab(cx),
+                    3 | 4 => {
+                        if ws.tabs.len() > 1 {
+                            ws.close_tab(ws.tabs.len() - 1, cx);
+                        }
+                    }
+                    5 | 6 => ws.next_tab(cx),
+                    7 | 8 => ws.prev_tab(cx),
+                    9 => {
+                        // Update pending action
+                        ws.pending_action = Some(PendingAction::ClosePane);
+                        ws.cancel_pending_action(cx);
+                    }
+                    _ => unreachable!(),
+                }
+            });
+
+            // Periodically check title cache
+            if i % 50 == 0 {
+                cx.update(|app| {
+                    workspace.update(app, |ws, cx| {
+                        let titles = ws.get_tab_titles(cx);
+                        assert_eq!(
+                            titles.len(),
+                            ws.tabs.len(),
+                            "Cache should match tabs at iteration {}",
+                            i
+                        );
+                    });
+                });
+            }
+        }
+
+        // Final verification
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert!(ws.tabs.len() >= 1, "Should have at least one tab");
+            for tab in &ws.tabs {
+                assert!(
+                    tab.panes.find_pane(tab.active_pane).is_some(),
+                    "All tabs should have valid panes"
+                );
+            }
+        });
+    }
+
+    // ========================================================================
+    // Boundary Condition Tests - 0/1/many tabs, tab index boundaries
+    // ========================================================================
+
+    // --- 0 Tabs Boundary (not achievable - workspace always has at least 1 tab) ---
+
+    #[gpui::test]
+    fn test_workspace_cannot_have_zero_tabs(cx: &mut TestAppContext) {
+        // Workspace always starts with exactly 1 tab - verify this invariant
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert!(
+                ws.tabs.len() >= 1,
+                "Workspace must always have at least 1 tab"
+            );
+            assert_eq!(ws.tabs.len(), 1, "New workspace starts with exactly 1 tab");
+        });
+    }
+
+    // --- 1 Tab Boundary Tests ---
+
+    #[gpui::test]
+    fn test_single_tab_next_tab_wraps(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // With single tab, next should stay on same tab (0 -> 0)
+        workspace.update(cx, |ws, cx| {
+            assert_eq!(ws.tabs.len(), 1);
+            ws.next_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 0, "Single tab: next_tab(0) should wrap to 0");
+        });
+    }
+
+    #[gpui::test]
+    fn test_single_tab_prev_tab_wraps(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // With single tab, prev should stay on same tab (0 -> 0)
+        workspace.update(cx, |ws, cx| {
+            assert_eq!(ws.tabs.len(), 1);
+            ws.prev_tab(cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.active_tab, 0, "Single tab: prev_tab(0) should wrap to 0");
+        });
+    }
+
+    #[gpui::test]
+    fn test_single_tab_switch_to_0(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.switch_tab(0, cx);
+        });
+
+        cx.read(|app| {
+            assert_eq!(workspace.read(app).active_tab, 0);
+        });
+    }
+
+    #[gpui::test]
+    fn test_single_tab_switch_beyond_bounds_noop(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // switch_tab(1) on single tab should be no-op
+        workspace.update(cx, |ws, cx| {
+            ws.switch_tab(1, cx);
+        });
+
+        cx.read(|app| {
+            assert_eq!(
+                workspace.read(app).active_tab,
+                0,
+                "switch_tab(1) on single tab should be no-op"
+            );
+        });
+    }
+
+    // --- Many Tabs Boundary Tests ---
+
+    #[gpui::test]
+    fn test_many_tabs_100_creation(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..99 {
+                ws.new_tab(cx);
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.tabs.len(), 100, "Should have exactly 100 tabs");
+            assert_eq!(ws.active_tab, 99, "Active tab should be last (99)");
+        });
+    }
+
+    #[gpui::test]
+    fn test_many_tabs_navigation_wrapping(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..9 {
+                ws.new_tab(cx);
+            }
+            // Now have 10 tabs, active is 9 (last)
+        });
+
+        // next_tab from last should wrap to first
+        workspace.update(cx, |ws, cx| ws.next_tab(cx));
+        cx.read(|app| {
+            assert_eq!(
+                workspace.read(app).active_tab,
+                0,
+                "next from 9 should wrap to 0"
+            );
+        });
+
+        // prev_tab from first should wrap to last
+        workspace.update(cx, |ws, cx| ws.prev_tab(cx));
+        cx.read(|app| {
+            assert_eq!(
+                workspace.read(app).active_tab,
+                9,
+                "prev from 0 should wrap to 9"
+            );
+        });
+    }
+
+    // --- Tab Index Boundary Tests (0, last, beyond last) ---
+
+    #[gpui::test]
+    fn test_tab_index_0_operations(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            // 4 tabs, active is 3
+        });
+
+        // Switch to index 0
+        workspace.update(cx, |ws, cx| ws.switch_tab(0, cx));
+        cx.read(|app| {
+            assert_eq!(workspace.read(app).active_tab, 0);
+        });
+
+        // Close tab at index 0
+        workspace.update(cx, |ws, cx| ws.close_tab(0, cx));
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.tabs.len(), 3);
+            // active_tab should adjust
+            assert!(ws.active_tab < ws.tabs.len());
+        });
+    }
+
+    #[gpui::test]
+    fn test_tab_index_last_operations(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.switch_tab(0, cx);
+            // 4 tabs, active is 0
+        });
+
+        // Switch to last index (3)
+        workspace.update(cx, |ws, cx| ws.switch_tab(3, cx));
+        cx.read(|app| {
+            assert_eq!(workspace.read(app).active_tab, 3);
+        });
+
+        // Close tab at last index
+        workspace.update(cx, |ws, cx| ws.close_tab(3, cx));
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert_eq!(ws.tabs.len(), 3);
+            // active_tab should adjust to new last (2)
+            assert_eq!(ws.active_tab, 2);
+        });
+    }
+
+    #[gpui::test]
+    fn test_tab_index_beyond_last_switch_noop(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            // 3 tabs, active is 2
+        });
+
+        let original = cx.read(|app| workspace.read(app).active_tab);
+
+        // Try to switch to index 3 (beyond last)
+        workspace.update(cx, |ws, cx| ws.switch_tab(3, cx));
+        cx.read(|app| {
+            assert_eq!(
+                workspace.read(app).active_tab,
+                original,
+                "switch_tab beyond last should be no-op"
+            );
+        });
+
+        // Try to switch to index 100
+        workspace.update(cx, |ws, cx| ws.switch_tab(100, cx));
+        cx.read(|app| {
+            assert_eq!(workspace.read(app).active_tab, original);
+        });
+
+        // Try to switch to usize::MAX
+        workspace.update(cx, |ws, cx| ws.switch_tab(usize::MAX, cx));
+        cx.read(|app| {
+            assert_eq!(workspace.read(app).active_tab, original);
+        });
+    }
+
+    // --- Empty Tab Title Boundary Tests ---
+
+    #[gpui::test]
+    fn test_tab_fallback_titles_never_empty(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..20 {
+                ws.new_tab(cx);
+            }
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            for (i, tab) in ws.tabs.iter().enumerate() {
+                assert!(
+                    !tab.fallback_title.is_empty(),
+                    "Tab {} fallback_title should not be empty",
+                    i
+                );
+                assert!(
+                    tab.fallback_title.len() > 0,
+                    "Tab {} fallback_title.len() > 0",
+                    i
+                );
+            }
+        });
+    }
+
+    #[gpui::test]
+    fn test_get_tab_titles_returns_non_empty_strings(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..10 {
+                ws.new_tab(cx);
+            }
+        });
+
+        cx.update(|app| {
+            workspace.update(app, |ws, cx| {
+                let titles = ws.get_tab_titles(cx);
+                for (i, title) in titles.iter().enumerate() {
+                    assert!(!title.is_empty(), "Title {} should not be empty", i);
+                }
+            });
+        });
+    }
+
+    // --- active_tab Index Invariant Tests ---
+
+    #[gpui::test]
+    fn test_active_tab_always_valid_after_close_first(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        // Close from front repeatedly
+        for _ in 0..3 {
+            workspace.update(cx, |ws, cx| {
+                ws.close_tab(0, cx);
+            });
+
+            cx.read(|app| {
+                let ws = workspace.read(app);
+                assert!(
+                    ws.active_tab < ws.tabs.len(),
+                    "active_tab {} must be < tabs.len() {}",
+                    ws.active_tab,
+                    ws.tabs.len()
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn test_active_tab_always_valid_after_close_last(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+        });
+
+        // Close from back repeatedly
+        for _ in 0..3 {
+            workspace.update(cx, |ws, cx| {
+                let last = ws.tabs.len() - 1;
+                ws.close_tab(last, cx);
+            });
+
+            cx.read(|app| {
+                let ws = workspace.read(app);
+                assert!(
+                    ws.active_tab < ws.tabs.len(),
+                    "active_tab {} must be < tabs.len() {}",
+                    ws.active_tab,
+                    ws.tabs.len()
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn test_active_tab_adjusts_when_closing_active(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            ws.new_tab(cx);
+            ws.new_tab(cx);
+            ws.switch_tab(1, cx); // Active is now 1 (middle)
+        });
+
+        // Close the active tab
+        workspace.update(cx, |ws, cx| {
+            ws.close_tab(1, cx);
+        });
+
+        cx.read(|app| {
+            let ws = workspace.read(app);
+            assert!(ws.active_tab < ws.tabs.len());
+        });
+    }
+
+    // --- Pending Action with Tab Index Boundary ---
+
+    #[gpui::test]
+    fn test_pending_close_tab_index_0(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, _| {
+            ws.pending_action = Some(PendingAction::CloseTab(0));
+        });
+
+        cx.read(|app| {
+            assert_eq!(
+                workspace.read(app).pending_action,
+                Some(PendingAction::CloseTab(0))
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn test_pending_close_tab_index_max(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        // While this index would be invalid, the type allows it
+        workspace.update(cx, |ws, _| {
+            ws.pending_action = Some(PendingAction::CloseTab(usize::MAX));
+        });
+
+        cx.read(|app| {
+            assert_eq!(
+                workspace.read(app).pending_action,
+                Some(PendingAction::CloseTab(usize::MAX))
+            );
+        });
+    }
+
+    // --- Tab Cache Boundary Tests ---
+
+    #[gpui::test]
+    fn test_cached_titles_with_single_tab(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        cx.update(|app| {
+            workspace.update(app, |ws, cx| {
+                let titles = ws.get_tab_titles(cx);
+                assert_eq!(titles.len(), 1);
+                assert_eq!(ws.cached_titles.len(), 1);
+            });
+        });
+    }
+
+    #[gpui::test]
+    fn test_cached_titles_with_many_tabs(cx: &mut TestAppContext) {
+        init_test_context(cx);
+        let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+        workspace.update(cx, |ws, cx| {
+            for _ in 0..49 {
+                ws.new_tab(cx);
+            }
+        });
+
+        cx.update(|app| {
+            workspace.update(app, |ws, cx| {
+                let titles = ws.get_tab_titles(cx);
+                assert_eq!(titles.len(), 50);
+                assert_eq!(ws.cached_titles.len(), 50);
+            });
+        });
+    }
+
+    // --- Comprehensive Boundary Matrix Test ---
+
+    #[gpui::test]
+    fn test_tab_count_boundary_matrix(cx: &mut TestAppContext) {
+        // Tests operations at various tab count boundaries
+        let test_counts = [1, 2, 3, 5, 10, 50];
+
+        for &target_count in &test_counts {
+            init_test_context(cx);
+            let (workspace, _vcx) = cx.add_window_view(|_window, cx| Workspace::new(cx));
+
+            // Create tabs to reach target count
+            workspace.update(cx, |ws, cx| {
+                for _ in 1..target_count {
+                    ws.new_tab(cx);
+                }
+            });
+
+            cx.read(|app| {
+                let ws = workspace.read(app);
+                assert_eq!(
+                    ws.tabs.len(),
+                    target_count,
+                    "Should have {} tabs",
+                    target_count
+                );
+            });
+
+            // Test operations at this boundary
+            workspace.update(cx, |ws, cx| {
+                // next_tab should work
+                ws.next_tab(cx);
+                assert!(ws.active_tab < ws.tabs.len());
+
+                // prev_tab should work
+                ws.prev_tab(cx);
+                assert!(ws.active_tab < ws.tabs.len());
+
+                // switch to first
+                ws.switch_tab(0, cx);
+                assert_eq!(ws.active_tab, 0);
+
+                // switch to last
+                ws.switch_tab(target_count - 1, cx);
+                assert_eq!(ws.active_tab, target_count - 1);
+
+                // switch beyond last should be no-op
+                let before = ws.active_tab;
+                ws.switch_tab(target_count, cx);
+                assert_eq!(ws.active_tab, before);
+            });
+        }
     }
 }

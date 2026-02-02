@@ -1,0 +1,65 @@
+# Cargo configuration for HumanSSH
+# Optimized for development and testing on macOS
+
+[build]
+# Use all available CPU cores for parallel compilation
+jobs = -1
+
+[profile.test]
+# Enable incremental compilation for faster test rebuilds
+incremental = true
+# Keep some optimization for realistic performance testing
+opt-level = 1
+
+[env]
+# Better backtraces in tests - shows full backtraces on panic
+RUST_BACKTRACE = { value = "1", force = false }
+
+[target.'cfg(target_os = "macos")']
+# macOS-specific linker optimizations
+rustflags = [
+    # Use the system linker with optimizations
+    "-C", "link-arg=-Wl,-dead_strip",
+    # Enable better debug info for profiling
+    "-C", "force-frame-pointers=yes",
+]
+
+[target.x86_64-apple-darwin]
+# Intel Mac specific settings
+rustflags = [
+    "-C", "link-arg=-Wl,-dead_strip",
+    "-C", "force-frame-pointers=yes",
+]
+
+[target.aarch64-apple-darwin]
+# Apple Silicon specific settings
+rustflags = [
+    "-C", "link-arg=-Wl,-dead_strip",
+    "-C", "force-frame-pointers=yes",
+]
+
+# Aliases for common commands
+[alias]
+# Test aliases
+t = "test"
+nt = "nextest run"
+ntr = "nextest run --release"
+# Quick test with output
+tq = "test -- --nocapture"
+# Test a specific module
+tm = "test --lib"
+# Run tests with all features
+ta = "test --all-features"
+
+# Build aliases
+b = "build"
+br = "build --release"
+c = "check"
+cl = "clippy"
+
+# Run aliases
+r = "run"
+rr = "run --release"
+
+# Documentation
+d = "doc --no-deps --open"
