@@ -7,3 +7,7 @@ pub mod app;
 pub mod config;
 pub mod terminal;
 pub mod theme;
+
+// Test utilities module - only compiled during tests
+#[cfg(test)]
+pub mod test_utils;
