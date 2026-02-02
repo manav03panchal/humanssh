@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Pane abstraction (`PaneKind` enum) for extensible pane types (terminal, SSH, etc.)
+- Terminal types module (`src/terminal/types.rs`) for testable data structures
+- Terminal colors module (`src/terminal/colors.rs`) for color conversion utilities
+- Architecture documentation in terminal module
 - Settings validation with file size limits (64KB max) and field validation
 - Bracketed paste mode support to prevent clipboard injection attacks
 - PTY spawn failure now displays error message in terminal with troubleshooting tips
@@ -21,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Roadmap section in README documenting planned features
 
 ### Changed
+- **Breaking**: `PaneNode` now uses `PaneKind` enum instead of `Entity<TerminalPane>` directly
+- Extracted color conversion to `terminal/colors.rs` module
+- Extracted terminal data types to `terminal/types.rs` module
+- Reduced `terminal/pane.rs` from ~1815 lines to ~1560 lines
 - Switched from `std::sync::Mutex` to `parking_lot::Mutex` (no poisoning panics)
 - Extracted settings UI to separate module (`src/app/settings.rs`)
 - Optimized `get_selected_text` to stream directly without intermediate grid allocation

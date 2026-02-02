@@ -26,7 +26,7 @@ pub fn render_pane_tree(
     let border = colors.border;
 
     match node {
-        PaneNode::Leaf { id, terminal } => {
+        PaneNode::Leaf { id, pane } => {
             let is_active = *id == active_pane;
             let pane_id = *id;
 
@@ -40,7 +40,7 @@ pub fn render_pane_tree(
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.set_active_pane(pane_id, cx);
                 }))
-                .child(terminal.clone())
+                .child(pane.render(_window))
                 .into_any_element()
         }
         PaneNode::Split {

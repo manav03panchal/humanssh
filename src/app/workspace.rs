@@ -1,5 +1,6 @@
 //! Main workspace - container for tabs and split panes.
 
+use super::pane::PaneKind;
 use super::pane_group::{PaneNode, SplitDirection};
 use crate::actions::{CloseTab, OpenSettings, Quit};
 use crate::config::timing;
@@ -34,12 +35,11 @@ struct Tab {
 }
 
 impl Tab {
-    /// Get the display title for this tab (dynamic from terminal or fallback)
+    /// Get the display title for this tab (dynamic from pane or fallback)
     fn display_title(&self, cx: &App) -> SharedString {
-        // Try to get dynamic title from the active pane's terminal
-        if let Some(terminal) = self.panes.find_terminal(self.active_pane) {
-            if let Some(title) = terminal.read(cx).title() {
-                // Extract just the last component (e.g., "vim file.txt" or "zsh")
+        // Try to get dynamic title from the active pane
+        if let Some(pane) = self.panes.find_pane(self.active_pane) {
+            if let Some(title) = pane.title(cx) {
                 return title;
             }
         }
@@ -71,7 +71,7 @@ impl Workspace {
     /// Create a new workspace with a single tab containing one terminal pane.
     pub fn new(cx: &mut Context<Self>) -> Self {
         let terminal = cx.new(TerminalPane::new);
-        let panes = PaneNode::new_leaf(terminal);
+        let panes = PaneNode::new_leaf(terminal.into());
         let active_pane = panes.first_leaf_id();
 
         let tab = Tab {
@@ -140,8 +140,8 @@ impl Workspace {
     /// Check if a tab has any running child processes
     fn tab_has_running_processes(&self, index: usize, cx: &App) -> bool {
         if let Some(tab) = self.tabs.get(index) {
-            for (_, terminal) in tab.panes.all_terminals() {
-                if terminal.read(cx).has_running_processes() {
+            for (_, pane) in tab.panes.all_panes() {
+                if pane.has_running_processes(cx) {
                     return true;
                 }
             }
@@ -152,8 +152,8 @@ impl Workspace {
     /// Get the name of a running process in a tab (for display)
     fn get_tab_running_process_name(&self, index: usize, cx: &App) -> Option<String> {
         if let Some(tab) = self.tabs.get(index) {
-            for (_, terminal) in tab.panes.all_terminals() {
-                if let Some(name) = terminal.read(cx).get_running_process_name() {
+            for (_, pane) in tab.panes.all_panes() {
+                if let Some(name) = pane.get_running_process_name(cx) {
                     return Some(name);
                 }
             }
@@ -224,7 +224,7 @@ impl Workspace {
 
     fn new_tab(&mut self, cx: &mut Context<Self>) {
         let terminal = cx.new(TerminalPane::new);
-        let panes = PaneNode::new_leaf(terminal);
+        let panes = PaneNode::new_leaf(terminal.into());
         let active_pane = panes.first_leaf_id();
         let tab_num = self.tabs.len() + 1;
 
@@ -287,10 +287,8 @@ impl Workspace {
     ) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
             let new_terminal = cx.new(TerminalPane::new);
-            if let Some(new_pane_id) =
-                tab.panes
-                    .split(tab.active_pane, direction, new_terminal.clone())
-            {
+            let new_pane: PaneKind = new_terminal.clone().into();
+            if let Some(new_pane_id) = tab.panes.split(tab.active_pane, direction, new_pane) {
                 // Set the new pane as active
                 tab.active_pane = new_pane_id;
                 // Focus the new terminal
@@ -311,10 +309,10 @@ impl Workspace {
     /// Request to close the active pane (with confirmation if needed)
     fn request_close_pane(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            if let Some(terminal) = tab.panes.find_terminal(tab.active_pane) {
-                if terminal.read(cx).has_running_processes() {
+            if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                if pane.has_running_processes(cx) {
                     // Show confirmation
-                    self.pending_process_name = terminal.read(cx).get_running_process_name();
+                    self.pending_process_name = pane.get_running_process_name(cx);
                     self.pending_action = Some(PendingAction::ClosePane);
                     cx.notify();
                     return;
@@ -328,7 +326,7 @@ impl Workspace {
     /// Actually close the active pane (or tab if only one pane, or quit if last tab)
     fn do_close_pane(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            let pane_count = tab.panes.all_terminals().len();
+            let pane_count = tab.panes.all_panes().len();
 
             if pane_count <= 1 {
                 // Last pane in tab - close the tab
@@ -381,11 +379,11 @@ impl Workspace {
 
         for (tab_idx, tab) in self.tabs.iter_mut().enumerate() {
             // Phase 1: Collect all exited pane IDs (avoid TOCTOU race)
-            let terminals = tab.panes.all_terminals();
-            let total_panes = terminals.len();
-            let exited_pane_ids: Vec<uuid::Uuid> = terminals
+            let panes = tab.panes.all_panes();
+            let total_panes = panes.len();
+            let exited_pane_ids: Vec<uuid::Uuid> = panes
                 .iter()
-                .filter(|(_, terminal)| terminal.read(cx).has_exited())
+                .filter(|(_, pane)| pane.has_exited(cx))
                 .map(|(id, _)| *id)
                 .collect();
             let exited_count = exited_pane_ids.len();
@@ -400,7 +398,7 @@ impl Workspace {
                 tabs_to_remove.push(tab_idx);
             } else if exited_count > 0 {
                 // Some panes removed - make sure active pane is valid
-                if tab.panes.find_terminal(tab.active_pane).is_none() {
+                if tab.panes.find_pane(tab.active_pane).is_none() {
                     tab.active_pane = tab.panes.first_leaf_id();
                 }
             }
@@ -429,12 +427,12 @@ impl Render for Workspace {
         // Save window bounds if changed
         self.maybe_save_window_bounds(window);
 
-        // Focus the active terminal in the active pane
+        // Focus the active pane
         if let Some(tab) = self.tabs.get(self.active_tab) {
-            if let Some(terminal) = tab.panes.find_terminal(tab.active_pane) {
-                let terminal_focus = terminal.read(cx).focus_handle.clone();
-                if !terminal_focus.is_focused(window) {
-                    window.focus(&terminal_focus);
+            if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                let pane_focus = pane.focus_handle(cx);
+                if !pane_focus.is_focused(window) {
+                    window.focus(&pane_focus);
                 }
             }
         }

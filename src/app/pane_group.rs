@@ -1,17 +1,17 @@
 //! Pane group for split pane layouts.
 //!
-//! This module provides a tree-based layout system for terminal panes.
+//! This module provides a tree-based layout system for panes.
 //! Panes can be split horizontally or vertically, creating a binary tree
-//! where leaves are terminals and internal nodes are splits.
+//! where leaves are pane content and internal nodes are splits.
 //!
 //! # Structure
 //!
 //! ```text
 //! Split (Horizontal)
-//! ├── Leaf (Terminal 1)
+//! ├── Leaf (Pane 1)
 //! └── Split (Vertical)
-//!     ├── Leaf (Terminal 2)
-//!     └── Leaf (Terminal 3)
+//!     ├── Leaf (Pane 2)
+//!     └── Leaf (Pane 3)
 //! ```
 //!
 //! # Usage
@@ -19,12 +19,12 @@
 //! ```ignore
 //! // Create a new pane with a terminal
 //! let terminal = cx.new(TerminalPane::new);
-//! let mut panes = PaneNode::new_leaf(terminal);
+//! let mut panes = PaneNode::new_leaf(terminal.into());
 //! let first_id = panes.first_leaf_id();
 //!
 //! // Split the pane vertically
 //! let new_terminal = cx.new(TerminalPane::new);
-//! if let Some(new_id) = panes.split(first_id, SplitDirection::Vertical, new_terminal) {
+//! if let Some(new_id) = panes.split(first_id, SplitDirection::Vertical, new_terminal.into()) {
 //!     // new_id is the UUID of the newly created pane
 //! }
 //!
@@ -32,8 +32,7 @@
 //! panes.remove(new_id);
 //! ```
 
-use crate::terminal::TerminalPane;
-use gpui::Entity;
+use super::pane::PaneKind;
 use uuid::Uuid;
 
 /// Direction of a split between two panes.
@@ -45,12 +44,12 @@ pub enum SplitDirection {
     Vertical,
 }
 
-/// A pane group node - either a leaf (terminal) or a split (two children)
+/// A pane group node - either a leaf (pane content) or a split (two children)
 #[derive(Clone)]
 pub enum PaneNode {
     Leaf {
         id: Uuid,
-        terminal: Entity<TerminalPane>,
+        pane: PaneKind,
     },
     Split {
         direction: SplitDirection,
@@ -62,32 +61,32 @@ pub enum PaneNode {
 }
 
 impl PaneNode {
-    /// Creates a new leaf node containing a terminal pane.
+    /// Creates a new leaf node containing a pane.
     ///
     /// Each leaf is assigned a unique UUID for identification.
-    pub fn new_leaf(terminal: Entity<TerminalPane>) -> Self {
+    pub fn new_leaf(pane: PaneKind) -> Self {
         Self::Leaf {
             id: Uuid::new_v4(),
-            terminal,
+            pane,
         }
     }
 
-    /// Splits a pane into two, creating a new terminal in the second slot.
+    /// Splits a pane into two, creating a new pane in the second slot.
     ///
     /// Searches the tree for a pane matching `target_id`, then replaces it
-    /// with a split node containing the original pane and the new terminal.
+    /// with a split node containing the original pane and the new pane.
     ///
     /// Returns the UUID of the newly created pane, or `None` if the target wasn't found.
     pub fn split(
         &mut self,
         target_id: Uuid,
         direction: SplitDirection,
-        new_terminal: Entity<TerminalPane>,
+        new_pane: PaneKind,
     ) -> Option<Uuid> {
         match self {
-            PaneNode::Leaf { id, terminal } => {
+            PaneNode::Leaf { id, pane } => {
                 if *id == target_id {
-                    let old_terminal = terminal.clone();
+                    let old_pane = pane.clone();
                     let old_id = *id;
                     let new_id = Uuid::new_v4();
 
@@ -95,11 +94,11 @@ impl PaneNode {
                         direction,
                         first: Box::new(PaneNode::Leaf {
                             id: old_id,
-                            terminal: old_terminal,
+                            pane: old_pane,
                         }),
                         second: Box::new(PaneNode::Leaf {
                             id: new_id,
-                            terminal: new_terminal,
+                            pane: new_pane,
                         }),
                         ratio: 0.5,
                     };
@@ -109,8 +108,8 @@ impl PaneNode {
                 }
             }
             PaneNode::Split { first, second, .. } => first
-                .split(target_id, direction, new_terminal.clone())
-                .or_else(|| second.split(target_id, direction, new_terminal)),
+                .split(target_id, direction, new_pane.clone())
+                .or_else(|| second.split(target_id, direction, new_pane)),
         }
     }
 
@@ -124,35 +123,35 @@ impl PaneNode {
         }
     }
 
-    /// Collects all terminal panes in the tree with their UUIDs.
+    /// Collects all panes in the tree with their UUIDs.
     ///
-    /// Returns a flat list of (id, terminal) pairs by traversing all leaves.
-    pub fn all_terminals(&self) -> Vec<(Uuid, Entity<TerminalPane>)> {
+    /// Returns a flat list of (id, pane) pairs by traversing all leaves.
+    pub fn all_panes(&self) -> Vec<(Uuid, PaneKind)> {
         match self {
-            PaneNode::Leaf { id, terminal } => vec![(*id, terminal.clone())],
+            PaneNode::Leaf { id, pane } => vec![(*id, pane.clone())],
             PaneNode::Split { first, second, .. } => {
-                let mut result = first.all_terminals();
-                result.extend(second.all_terminals());
+                let mut result = first.all_panes();
+                result.extend(second.all_panes());
                 result
             }
         }
     }
 
-    /// Finds a terminal pane by its UUID.
+    /// Finds a pane by its UUID.
     ///
-    /// Searches the tree recursively and returns the terminal entity if found.
-    pub fn find_terminal(&self, target_id: Uuid) -> Option<Entity<TerminalPane>> {
+    /// Searches the tree recursively and returns the pane if found.
+    pub fn find_pane(&self, target_id: Uuid) -> Option<PaneKind> {
         match self {
-            PaneNode::Leaf { id, terminal } => {
+            PaneNode::Leaf { id, pane } => {
                 if *id == target_id {
-                    Some(terminal.clone())
+                    Some(pane.clone())
                 } else {
                     None
                 }
             }
             PaneNode::Split { first, second, .. } => first
-                .find_terminal(target_id)
-                .or_else(|| second.find_terminal(target_id)),
+                .find_pane(target_id)
+                .or_else(|| second.find_pane(target_id)),
         }
     }
 

@@ -5,16 +5,18 @@
 //! - Merged background regions via paint_quad
 //! - Proper handling of TUI applications
 
+use super::colors::{apply_dim, color_to_hsla, get_bright_color};
+use super::types::{
+    BgRegion, CursorInfo, DisplayState, MouseEscBuf, RenderCell, RenderData, TermSize,
+};
 use super::PtyHandler;
 use crate::theme::{terminal_colors, TerminalColors};
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point as TermPoint, Side};
 use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::color::Colors as TermColors;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, Rgb};
+use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use base64::Engine;
 use gpui::*;
 use parking_lot::{Mutex, RwLock};
@@ -83,76 +85,6 @@ fn calculate_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) 
     (cell_width, cell_height)
 }
 
-/// A background region to be painted
-#[derive(Clone)]
-struct BgRegion {
-    row: usize,
-    col_start: usize,
-    col_end: usize,
-    color: Hsla,
-}
-
-/// Stack-allocated buffer for mouse escape sequences (avoids heap allocation).
-/// Max SGR sequence: `\x1b[<999;9999;9999M` = ~20 bytes, so 32 is plenty.
-struct MouseEscBuf {
-    buf: [u8; 32],
-    len: usize,
-}
-
-impl MouseEscBuf {
-    fn new() -> Self {
-        Self {
-            buf: [0; 32],
-            len: 0,
-        }
-    }
-
-    fn as_str(&self) -> &str {
-        // Safety: we only write valid UTF-8 (ASCII escape sequences)
-        unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len]) }
-    }
-}
-
-impl std::fmt::Write for MouseEscBuf {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let bytes = s.as_bytes();
-        let remaining = 32 - self.len;
-        let to_write = bytes.len().min(remaining);
-        self.buf[self.len..self.len + to_write].copy_from_slice(&bytes[..to_write]);
-        self.len += to_write;
-        Ok(())
-    }
-}
-
-/// Cursor rendering info
-#[derive(Clone, Copy)]
-struct CursorInfo {
-    row: usize,
-    col: usize,
-    shape: CursorShape,
-    color: Hsla,
-}
-
-/// A single cell to render
-#[derive(Clone)]
-struct RenderCell {
-    row: usize,
-    col: usize,
-    c: char,
-    fg: Hsla,
-    flags: CellFlags,
-}
-
-/// Pre-computed render data for a single frame
-struct RenderData {
-    /// Cells to render (non-space cells only)
-    cells: Vec<RenderCell>,
-    /// Background regions (non-default backgrounds only)
-    bg_regions: Vec<BgRegion>,
-    /// Cursor info (separate from bg_regions for proper shape handling)
-    cursor: Option<CursorInfo>,
-}
-
 /// Event listener that captures terminal events (like title changes)
 #[derive(Clone)]
 struct Listener {
@@ -171,52 +103,6 @@ impl EventListener for Listener {
     fn send_event(&self, event: Event) {
         if let Event::Title(title) = event {
             *self.title.lock() = Some(title);
-        }
-    }
-}
-
-/// Size provider for the terminal
-#[derive(Clone, Copy, Debug)]
-struct TermSize {
-    cols: u16,
-    rows: u16,
-}
-
-impl Dimensions for TermSize {
-    fn total_lines(&self) -> usize {
-        self.rows as usize
-    }
-
-    fn screen_lines(&self) -> usize {
-        self.rows as usize
-    }
-
-    fn columns(&self) -> usize {
-        self.cols as usize
-    }
-}
-
-/// Consolidated display state (reduces lock contention by grouping read-heavy fields).
-/// Uses RwLock for better read concurrency since most access is read-only during render.
-#[derive(Clone)]
-struct DisplayState {
-    /// Terminal dimensions in rows/columns
-    size: TermSize,
-    /// Cell dimensions (width, height) - calculated from font metrics
-    cell_dims: (f32, f32),
-    /// Element bounds in window coordinates (for mouse position conversion)
-    bounds: Option<Bounds<Pixels>>,
-    /// Current font size
-    font_size: f32,
-}
-
-impl Default for DisplayState {
-    fn default() -> Self {
-        Self {
-            size: TermSize { cols: 80, rows: 24 },
-            cell_dims: (8.4, 17.0),
-            bounds: None,
-            font_size: DEFAULT_FONT_SIZE,
         }
     }
 }
@@ -939,147 +825,6 @@ impl TerminalPane {
                 cx.notify();
             }
         }
-    }
-}
-
-/// Convert RGB to Hsla
-fn rgb_to_hsla(rgb: Rgb) -> Hsla {
-    Hsla::from(Rgba {
-        r: rgb.r as f32 / 255.0,
-        g: rgb.g as f32 / 255.0,
-        b: rgb.b as f32 / 255.0,
-        a: 1.0,
-    })
-}
-
-/// Convert alacritty color to GPUI Hsla using terminal colors with theme fallbacks
-fn color_to_hsla(color: Color, term_colors: &TermColors, theme: &TerminalColors) -> Hsla {
-    match color {
-        Color::Named(named) => {
-            // Check if terminal has custom color set, otherwise use theme
-            if let Some(rgb) = term_colors[named] {
-                rgb_to_hsla(rgb)
-            } else {
-                named_color_to_hsla(named, theme)
-            }
-        }
-        Color::Spec(rgb) => rgb_to_hsla(rgb),
-        Color::Indexed(idx) => {
-            // Check if terminal has custom color set
-            if let Some(rgb) = term_colors[idx as usize] {
-                rgb_to_hsla(rgb)
-            } else {
-                indexed_color_to_hsla(idx, theme)
-            }
-        }
-    }
-}
-
-fn named_color_to_hsla(color: NamedColor, colors: &TerminalColors) -> Hsla {
-    match color {
-        NamedColor::Black => colors.black,
-        NamedColor::Red => colors.red,
-        NamedColor::Green => colors.green,
-        NamedColor::Yellow => colors.yellow,
-        NamedColor::Blue => colors.blue,
-        NamedColor::Magenta => colors.magenta,
-        NamedColor::Cyan => colors.cyan,
-        NamedColor::White => colors.white,
-        NamedColor::BrightBlack => colors.bright_black,
-        NamedColor::BrightRed => colors.bright_red,
-        NamedColor::BrightGreen => colors.bright_green,
-        NamedColor::BrightYellow => colors.bright_yellow,
-        NamedColor::BrightBlue => colors.bright_blue,
-        NamedColor::BrightMagenta => colors.bright_magenta,
-        NamedColor::BrightCyan => colors.bright_cyan,
-        NamedColor::BrightWhite => colors.bright_white,
-        NamedColor::Foreground => colors.foreground,
-        NamedColor::Background => colors.background,
-        NamedColor::Cursor => colors.cursor,
-        _ => colors.foreground,
-    }
-}
-
-fn indexed_color_to_hsla(idx: u8, colors: &TerminalColors) -> Hsla {
-    match idx {
-        0..=15 => {
-            let named = match idx {
-                0 => NamedColor::Black,
-                1 => NamedColor::Red,
-                2 => NamedColor::Green,
-                3 => NamedColor::Yellow,
-                4 => NamedColor::Blue,
-                5 => NamedColor::Magenta,
-                6 => NamedColor::Cyan,
-                7 => NamedColor::White,
-                8 => NamedColor::BrightBlack,
-                9 => NamedColor::BrightRed,
-                10 => NamedColor::BrightGreen,
-                11 => NamedColor::BrightYellow,
-                12 => NamedColor::BrightBlue,
-                13 => NamedColor::BrightMagenta,
-                14 => NamedColor::BrightCyan,
-                15 => NamedColor::BrightWhite,
-                _ => NamedColor::Foreground,
-            };
-            named_color_to_hsla(named, colors)
-        }
-        16..=231 => {
-            // 6x6x6 color cube
-            let idx = idx - 16;
-            let r = (idx / 36) as f32 / 5.0;
-            let g = ((idx % 36) / 6) as f32 / 5.0;
-            let b = (idx % 6) as f32 / 5.0;
-            Hsla::from(Rgba { r, g, b, a: 1.0 })
-        }
-        232..=255 => {
-            // Grayscale
-            let gray = (idx - 232) as f32 / 23.0 * 0.9 + 0.08;
-            hsla(0.0, 0.0, gray, 1.0)
-        }
-    }
-}
-
-/// Apply DIM flag - reduce brightness by 33%
-fn apply_dim(color: Hsla) -> Hsla {
-    hsla(color.h, color.s, color.l * 0.66, color.a)
-}
-
-/// Get bright variant of a named color
-fn get_bright_color(color: Color, term_colors: &TermColors, theme: &TerminalColors) -> Hsla {
-    match color {
-        Color::Named(NamedColor::Black) => term_colors[NamedColor::BrightBlack]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_black),
-        Color::Named(NamedColor::Red) => term_colors[NamedColor::BrightRed]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_red),
-        Color::Named(NamedColor::Green) => term_colors[NamedColor::BrightGreen]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_green),
-        Color::Named(NamedColor::Yellow) => term_colors[NamedColor::BrightYellow]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_yellow),
-        Color::Named(NamedColor::Blue) => term_colors[NamedColor::BrightBlue]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_blue),
-        Color::Named(NamedColor::Magenta) => term_colors[NamedColor::BrightMagenta]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_magenta),
-        Color::Named(NamedColor::Cyan) => term_colors[NamedColor::BrightCyan]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_cyan),
-        Color::Named(NamedColor::White) => term_colors[NamedColor::BrightWhite]
-            .map(rgb_to_hsla)
-            .unwrap_or(theme.bright_white),
-        Color::Indexed(idx) if idx < 8 => {
-            // Convert 0-7 to bright variants (8-15)
-            let bright_idx = idx + 8;
-            term_colors[bright_idx as usize]
-                .map(rgb_to_hsla)
-                .unwrap_or_else(|| indexed_color_to_hsla(bright_idx, theme))
-        }
-        other => color_to_hsla(other, term_colors, theme),
     }
 }
 
