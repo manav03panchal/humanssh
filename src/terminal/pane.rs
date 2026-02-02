@@ -1578,3 +1578,431 @@ impl Focusable for TerminalPane {
         self.focus_handle.clone()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use test_case::test_case;
+
+    // ============================================================================
+    // Unit Tests for Pure Functions and Data Structures
+    // ============================================================================
+
+    // These tests don't require GPUI context and test pure functions/data types
+
+    // ============================================================================
+    // Display State Tests (No GPUI required)
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_display_state_default() {
+        let display = DisplayState::default();
+
+        // Check default terminal size (80x24 is standard)
+        assert_eq!(display.size.cols, 80, "Default columns should be 80");
+        assert_eq!(display.size.rows, 24, "Default rows should be 24");
+
+        // Check cell dimensions are reasonable
+        assert!(display.cell_dims.0 > 0.0, "Cell width should be positive");
+        assert!(display.cell_dims.1 > 0.0, "Cell height should be positive");
+
+        // Check font size is within valid range
+        assert!(
+            display.font_size >= MIN_FONT_SIZE,
+            "Font size should be >= MIN"
+        );
+        assert!(
+            display.font_size <= MAX_FONT_SIZE,
+            "Font size should be <= MAX"
+        );
+        assert_eq!(
+            display.font_size, DEFAULT_FONT_SIZE,
+            "Font size should be default"
+        );
+    }
+
+    #[test_case(MIN_FONT_SIZE ; "minimum font size")]
+    #[test_case(DEFAULT_FONT_SIZE ; "default font size")]
+    #[test_case(MAX_FONT_SIZE ; "maximum font size")]
+    #[test_case(16.0 ; "custom font size")]
+    fn test_display_state_font_size_values(expected_size: f32) {
+        let display = DisplayState {
+            font_size: expected_size,
+            ..Default::default()
+        };
+        assert_eq!(display.font_size, expected_size);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_display_state_clone() {
+        let original = DisplayState {
+            font_size: 20.0,
+            size: TermSize {
+                cols: 100,
+                rows: 50,
+            },
+            cell_dims: (12.0, 24.0),
+            bounds: None,
+        };
+        let cloned = original.clone();
+
+        assert_eq!(original.font_size, cloned.font_size);
+        assert_eq!(original.size.cols, cloned.size.cols);
+        assert_eq!(original.size.rows, cloned.size.rows);
+        assert_eq!(original.cell_dims, cloned.cell_dims);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_display_state_bounds_none_initially() {
+        let display = DisplayState::default();
+        assert!(display.bounds.is_none(), "Bounds should be None initially");
+    }
+
+    // ============================================================================
+    // MouseEscBuf Tests (Unit tests for the helper)
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_creation() {
+        let buf = MouseEscBuf::new();
+        assert_eq!(buf.as_str(), "");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_write() {
+        let mut buf = MouseEscBuf::new();
+        use std::fmt::Write;
+        write!(buf, "\x1b[<0;10;20M").unwrap();
+        assert_eq!(buf.as_str(), "\x1b[<0;10;20M");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_sgr_format() {
+        let mut buf = MouseEscBuf::new();
+        use std::fmt::Write;
+        let button = 0;
+        let col = 10;
+        let row = 5;
+        write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1).unwrap();
+        assert_eq!(buf.as_str(), "\x1b[<0;11;6M");
+    }
+
+    // ============================================================================
+    // Text Run Creation Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_create_text_run_basic() {
+        let font_family: SharedString = "Test Font".into();
+        let fg = Hsla::default();
+        let run = create_text_run(5, &font_family, fg, CellFlags::empty());
+
+        assert_eq!(run.len, 5);
+        assert_eq!(run.font.weight, FontWeight::NORMAL);
+        assert_eq!(run.font.style, FontStyle::Normal);
+        assert!(run.underline.is_none());
+        assert!(run.strikethrough.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_create_text_run_bold() {
+        let font_family: SharedString = "Test Font".into();
+        let fg = Hsla::default();
+        let run = create_text_run(5, &font_family, fg, CellFlags::BOLD);
+
+        assert_eq!(run.font.weight, FontWeight::BOLD);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_create_text_run_italic() {
+        let font_family: SharedString = "Test Font".into();
+        let fg = Hsla::default();
+        let run = create_text_run(5, &font_family, fg, CellFlags::ITALIC);
+
+        assert_eq!(run.font.style, FontStyle::Italic);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_create_text_run_underline() {
+        let font_family: SharedString = "Test Font".into();
+        let fg = Hsla::default();
+        let run = create_text_run(5, &font_family, fg, CellFlags::UNDERLINE);
+
+        assert!(run.underline.is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_create_text_run_strikethrough() {
+        let font_family: SharedString = "Test Font".into();
+        let fg = Hsla::default();
+        let run = create_text_run(5, &font_family, fg, CellFlags::STRIKEOUT);
+
+        assert!(run.strikethrough.is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_create_text_run_combined_flags() {
+        let font_family: SharedString = "Test Font".into();
+        let fg = Hsla::default();
+        let flags = CellFlags::BOLD | CellFlags::ITALIC | CellFlags::UNDERLINE;
+        let run = create_text_run(5, &font_family, fg, flags);
+
+        assert_eq!(run.font.weight, FontWeight::BOLD);
+        assert_eq!(run.font.style, FontStyle::Italic);
+        assert!(run.underline.is_some());
+    }
+
+    // ============================================================================
+    // TermSize Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_term_size_default() {
+        let size = TermSize::default();
+        assert_eq!(size.cols, 80);
+        assert_eq!(size.rows, 24);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_term_size_dimensions_trait() {
+        use alacritty_terminal::grid::Dimensions;
+        let size = TermSize {
+            cols: 100,
+            rows: 50,
+        };
+        assert_eq!(size.columns(), 100);
+        assert_eq!(size.total_lines(), 50);
+        assert_eq!(size.screen_lines(), 50);
+    }
+
+    #[test_case(80, 24 ; "standard terminal")]
+    #[test_case(120, 40 ; "large terminal")]
+    #[test_case(40, 10 ; "small terminal")]
+    #[test_case(10, 3 ; "minimum terminal")]
+    fn test_term_size_various_dimensions(cols: u16, rows: u16) {
+        use alacritty_terminal::grid::Dimensions;
+        let size = TermSize { cols, rows };
+        assert_eq!(size.columns(), cols as usize);
+        assert_eq!(size.total_lines(), rows as usize);
+    }
+
+    // ============================================================================
+    // Font Size Constraint Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_font_size_min_constraint() {
+        let clamped = (5.0_f32).max(MIN_FONT_SIZE);
+        assert_eq!(clamped, MIN_FONT_SIZE);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_font_size_max_constraint() {
+        let clamped = (100.0_f32).min(MAX_FONT_SIZE);
+        assert_eq!(clamped, MAX_FONT_SIZE);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_font_size_within_range() {
+        let font_size = 16.0_f32;
+        let clamped = font_size.max(MIN_FONT_SIZE).min(MAX_FONT_SIZE);
+        assert_eq!(clamped, font_size);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_font_size_zoom_in_logic() {
+        let initial = DEFAULT_FONT_SIZE;
+        let zoomed = (initial + 1.0).min(MAX_FONT_SIZE);
+        assert!(zoomed > initial || zoomed == MAX_FONT_SIZE);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_font_size_zoom_out_logic() {
+        let initial = DEFAULT_FONT_SIZE;
+        let zoomed = (initial - 1.0).max(MIN_FONT_SIZE);
+        assert!(zoomed < initial || zoomed == MIN_FONT_SIZE);
+    }
+
+    // ============================================================================
+    // Listener Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_listener_new() {
+        let listener = Listener::new();
+        assert!(listener.title.lock().is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_title_event() {
+        use alacritty_terminal::event::EventListener;
+        let listener = Listener::new();
+
+        // Send a title event
+        listener.send_event(alacritty_terminal::event::Event::Title(
+            "Test Title".to_string(),
+        ));
+
+        // Check the title was captured
+        let title = listener.title.lock();
+        assert_eq!(title.as_deref(), Some("Test Title"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_clone() {
+        use alacritty_terminal::event::EventListener;
+        let listener = Listener::new();
+        listener.send_event(alacritty_terminal::event::Event::Title(
+            "Original".to_string(),
+        ));
+
+        let cloned = listener.clone();
+
+        // Both should share the same Arc
+        assert_eq!(cloned.title.lock().as_deref(), Some("Original"));
+    }
+
+    // ============================================================================
+    // Text Run Style Flag Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_text_run_empty_flags() {
+        let font_family: SharedString = "Test".into();
+        let run = create_text_run(1, &font_family, Hsla::default(), CellFlags::empty());
+        assert_eq!(run.font.weight, FontWeight::NORMAL);
+        assert_eq!(run.font.style, FontStyle::Normal);
+        assert!(run.underline.is_none());
+        assert!(run.strikethrough.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_text_run_all_underline_variants() {
+        let font_family: SharedString = "Test".into();
+
+        for flags in [
+            CellFlags::UNDERLINE,
+            CellFlags::DOUBLE_UNDERLINE,
+            CellFlags::UNDERCURL,
+            CellFlags::DOTTED_UNDERLINE,
+            CellFlags::DASHED_UNDERLINE,
+        ] {
+            let run = create_text_run(1, &font_family, Hsla::default(), flags);
+            assert!(
+                run.underline.is_some(),
+                "Underline should be set for {:?}",
+                flags
+            );
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_text_run_undercurl_is_wavy() {
+        let font_family: SharedString = "Test".into();
+        let run = create_text_run(1, &font_family, Hsla::default(), CellFlags::UNDERCURL);
+
+        let underline = run.underline.unwrap();
+        assert!(underline.wavy, "Undercurl should have wavy=true");
+    }
+
+    // ============================================================================
+    // Pixel to Cell Conversion Logic Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_pixel_to_cell_calculation() {
+        // Test the core conversion logic without bounds
+        let cell_width = 10.0_f32;
+        let cell_height = 20.0_f32;
+        let padding = PADDING;
+
+        // Position at (PADDING + 25, PADDING + 45)
+        let local_x = 25.0_f32;
+        let local_y = 45.0_f32;
+
+        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
+        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
+
+        // With padding=2, local_x=25: (25-2)/10 = 2.3 -> floor = 2
+        // With padding=2, local_y=45: (45-2)/20 = 2.15 -> floor = 2
+        assert_eq!(cell_x, 2);
+        assert_eq!(cell_y, 2);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_pixel_to_cell_negative_result() {
+        let cell_width = 10.0_f32;
+        let cell_height = 20.0_f32;
+        let padding = PADDING;
+
+        // Position before padding
+        let local_x = 0.0_f32;
+        let local_y = 0.0_f32;
+
+        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
+        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
+
+        // Should be negative
+        assert!(cell_x < 0);
+        assert!(cell_y < 0);
+    }
+
+    // ============================================================================
+    // Mouse Escape Buffer Edge Cases
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_max_coordinates() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+        // Maximum supported coordinates (255 for legacy, larger for SGR)
+        write!(buf, "\x1b[<0;255;255M").unwrap();
+        assert_eq!(buf.as_str(), "\x1b[<0;255;255M");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_all_buttons() {
+        use std::fmt::Write;
+
+        for button in [0, 1, 2, 64, 65] {
+            // Left, Middle, Right, WheelUp, WheelDown
+            let mut buf = MouseEscBuf::new();
+            write!(buf, "\x1b[<{};10;10M", button).unwrap();
+            assert!(buf.as_str().contains(&format!("{}", button)));
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_release_format() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+        // SGR release uses lowercase 'm'
+        write!(buf, "\x1b[<0;10;10m").unwrap();
+        assert!(buf.as_str().ends_with('m'));
+    }
+
+    // ============================================================================
+    // Config Constants Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_config_constants_valid() {
+        assert!(MIN_FONT_SIZE > 0.0, "MIN_FONT_SIZE should be positive");
+        assert!(MAX_FONT_SIZE > MIN_FONT_SIZE, "MAX should be > MIN");
+        assert!(
+            DEFAULT_FONT_SIZE >= MIN_FONT_SIZE,
+            "DEFAULT should be >= MIN"
+        );
+        assert!(
+            DEFAULT_FONT_SIZE <= MAX_FONT_SIZE,
+            "DEFAULT should be <= MAX"
+        );
+        assert!(PADDING >= 0.0, "PADDING should be non-negative");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_font_family_not_empty() {
+        assert!(!FONT_FAMILY.is_empty(), "Font family should not be empty");
+    }
+}
