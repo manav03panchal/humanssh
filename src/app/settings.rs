@@ -118,3 +118,227 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
                 .child("Press Cmd+, to close"),
         )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ==================== Terminal Fonts List Tests ====================
+
+    mod terminal_fonts_tests {
+        use super::TERMINAL_FONTS;
+
+        #[test]
+        fn test_terminal_fonts_not_empty() {
+            assert!(
+                !TERMINAL_FONTS.is_empty(),
+                "TERMINAL_FONTS list should not be empty"
+            );
+        }
+
+        #[test]
+        fn test_terminal_fonts_has_reasonable_count() {
+            // Should have at least a few font options
+            assert!(
+                TERMINAL_FONTS.len() >= 3,
+                "TERMINAL_FONTS should have at least 3 options, got {}",
+                TERMINAL_FONTS.len()
+            );
+            // But not too many to be overwhelming
+            assert!(
+                TERMINAL_FONTS.len() <= 50,
+                "TERMINAL_FONTS should have at most 50 options, got {}",
+                TERMINAL_FONTS.len()
+            );
+        }
+
+        #[test]
+        fn test_all_font_names_non_empty() {
+            for (i, font) in TERMINAL_FONTS.iter().enumerate() {
+                assert!(!font.is_empty(), "Font at index {} should not be empty", i);
+            }
+        }
+
+        #[test]
+        fn test_all_font_names_trimmed() {
+            for (i, font) in TERMINAL_FONTS.iter().enumerate() {
+                assert_eq!(
+                    *font,
+                    font.trim(),
+                    "Font at index {} ('{}') should be trimmed",
+                    i,
+                    font
+                );
+            }
+        }
+
+        #[test]
+        fn test_no_duplicate_fonts() {
+            let mut seen = std::collections::HashSet::new();
+            for font in TERMINAL_FONTS {
+                assert!(seen.insert(*font), "Duplicate font found: '{}'", font);
+            }
+        }
+
+        #[test]
+        fn test_default_font_in_list() {
+            // The default font from config should be in the list
+            use crate::config::terminal::FONT_FAMILY;
+            assert!(
+                TERMINAL_FONTS.contains(&FONT_FAMILY),
+                "Default font '{}' should be in TERMINAL_FONTS list",
+                FONT_FAMILY
+            );
+        }
+
+        #[test]
+        fn test_fonts_are_likely_monospace() {
+            // All fonts should contain indicators of being monospace
+            let monospace_indicators = [
+                "Mono", "Code", "Consolas", "Monaco", "Menlo", "Courier", "Iosevka", "Source",
+                "Cascadia", "Ubuntu", "Fira",
+            ];
+
+            for font in TERMINAL_FONTS {
+                let has_indicator = monospace_indicators
+                    .iter()
+                    .any(|indicator| font.contains(indicator));
+                assert!(
+                    has_indicator,
+                    "Font '{}' doesn't appear to be a monospace font",
+                    font
+                );
+            }
+        }
+
+        #[test]
+        fn test_common_fonts_present() {
+            // Some very common monospace fonts should be in the list
+            let common_fonts = ["JetBrains Mono", "Fira Code", "Monaco", "Menlo"];
+
+            for expected in common_fonts {
+                assert!(
+                    TERMINAL_FONTS.contains(&expected),
+                    "Common font '{}' should be in TERMINAL_FONTS",
+                    expected
+                );
+            }
+        }
+
+        #[test]
+        fn test_font_name_lengths_reasonable() {
+            for font in TERMINAL_FONTS {
+                // Font names should be reasonable length
+                assert!(
+                    font.len() >= 4,
+                    "Font name '{}' is too short (min 4 chars)",
+                    font
+                );
+                assert!(
+                    font.len() <= 50,
+                    "Font name '{}' is too long (max 50 chars)",
+                    font
+                );
+            }
+        }
+
+        #[test]
+        fn test_fonts_use_valid_characters() {
+            for font in TERMINAL_FONTS {
+                // Font names should only contain alphanumeric, spaces, and some special chars
+                for c in font.chars() {
+                    assert!(
+                        c.is_alphanumeric() || c == ' ' || c == '-' || c == '_',
+                        "Font '{}' contains invalid character '{}'",
+                        font,
+                        c
+                    );
+                }
+            }
+        }
+    }
+
+    // ==================== Settings Dialog Width Tests ====================
+
+    mod dialog_width_tests {
+        #[test]
+        fn test_settings_dialog_width_matches_config() {
+            use crate::config::dialog::SETTINGS_WIDTH;
+            // The hardcoded 500.0 in toggle_settings_dialog should match SETTINGS_WIDTH
+            assert_eq!(
+                SETTINGS_WIDTH, 500.0,
+                "Settings dialog width should match config constant"
+            );
+        }
+    }
+
+    // ==================== Font List Ordering Tests ====================
+
+    mod font_ordering_tests {
+        use super::TERMINAL_FONTS;
+
+        #[test]
+        fn test_first_font_is_default() {
+            // The first font in the list should be the default
+            use crate::config::terminal::FONT_FAMILY;
+            assert_eq!(
+                TERMINAL_FONTS.first(),
+                Some(&FONT_FAMILY),
+                "First font in list should be the default font"
+            );
+        }
+
+        #[test]
+        fn test_popular_fonts_near_top() {
+            // Popular fonts should be in the first half of the list
+            let popular = ["JetBrains Mono", "Fira Code", "SF Mono"];
+            let half = TERMINAL_FONTS.len() / 2;
+
+            for font in popular {
+                if let Some(pos) = TERMINAL_FONTS.iter().position(|&f| f == font) {
+                    assert!(
+                        pos <= half,
+                        "Popular font '{}' should be in first half of list (position {}, half is {})",
+                        font,
+                        pos,
+                        half
+                    );
+                }
+            }
+        }
+    }
+
+    // ==================== Font Name Validation Tests ====================
+
+    mod font_validation_tests {
+        use super::TERMINAL_FONTS;
+
+        #[test]
+        fn test_fonts_fit_in_settings_max_string_length() {
+            use crate::config::settings::MAX_STRING_LENGTH;
+
+            for font in TERMINAL_FONTS {
+                assert!(
+                    font.len() <= MAX_STRING_LENGTH,
+                    "Font '{}' (len {}) exceeds MAX_STRING_LENGTH ({})",
+                    font,
+                    font.len(),
+                    MAX_STRING_LENGTH
+                );
+            }
+        }
+
+        #[test]
+        fn test_fonts_are_printable() {
+            for font in TERMINAL_FONTS {
+                for c in font.chars() {
+                    assert!(
+                        !c.is_control(),
+                        "Font '{}' contains control character",
+                        font
+                    );
+                }
+            }
+        }
+    }
+}
