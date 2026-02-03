@@ -1397,7 +1397,40 @@ impl Render for TerminalPane {
                 this.send_input("\x1b[Z"); // Shift-Tab escape sequence
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
-                if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "," {
+                // Handle keys that GPUI might intercept for focus/navigation
+                // These must be caught early before GPUI consumes them
+                let key = event.keystroke.key.as_str();
+                let mods = &event.keystroke.modifiers;
+
+                match key {
+                    // Tab/Shift+Tab - GPUI uses for focus navigation
+                    "tab" => {
+                        if mods.shift {
+                            this.send_input("\x1b[Z"); // Shift-Tab (backtab)
+                        } else {
+                            this.send_input("\t");
+                        }
+                        return;
+                    }
+                    // Escape - GPUI might use for closing dialogs
+                    "escape" => {
+                        this.send_input("\x1b");
+                        return;
+                    }
+                    // Enter - GPUI might use for form submission
+                    "enter" => {
+                        this.send_input("\r");
+                        return;
+                    }
+                    // Space - GPUI might use for button activation
+                    "space" if !mods.control && !mods.alt && !mods.platform => {
+                        this.send_input(" ");
+                        return;
+                    }
+                    _ => {}
+                }
+
+                if mods.platform && key == "," {
                     crate::app::toggle_settings_dialog(window, cx);
                     return;
                 }
