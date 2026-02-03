@@ -51,6 +51,20 @@ pub mod split {
     pub const DIVIDER_THICKNESS: f32 = 2.0;
 }
 
+/// Status bar configuration.
+pub mod status_bar {
+    use std::time::Duration;
+
+    /// Status bar height in pixels.
+    pub const HEIGHT: f32 = 24.0;
+    /// Horizontal padding.
+    pub const HORIZONTAL_PADDING: f32 = 12.0;
+    /// Gap between items.
+    pub const ITEM_GAP: f32 = 12.0;
+    /// Refresh interval for system stats.
+    pub const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+}
+
 /// Timing configuration.
 pub mod timing {
     use std::time::Duration;

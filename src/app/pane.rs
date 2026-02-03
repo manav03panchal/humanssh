@@ -128,6 +128,24 @@ impl PaneKind {
             PaneKind::Terminal(terminal) => terminal.clone().into_any_element(),
         }
     }
+
+    /// Get terminal info for status bar (shell, cwd, process).
+    pub fn get_terminal_info(&self, cx: &App) -> (String, String, String) {
+        match self {
+            PaneKind::Terminal(terminal) => {
+                let term = terminal.read(cx);
+                let shell = term.shell_name().unwrap_or_else(|| "—".to_string());
+                let cwd = term
+                    .get_current_directory()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "~".to_string());
+                let process = term
+                    .get_running_process_name()
+                    .unwrap_or_else(|| shell.clone());
+                (shell, cwd, process)
+            }
+        }
+    }
 }
 
 impl From<Entity<TerminalPane>> for PaneKind {

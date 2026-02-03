@@ -18,7 +18,6 @@ use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
-use base64::Engine;
 use gpui::*;
 use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
 
@@ -290,6 +289,127 @@ impl TerminalPane {
         pane
     }
 
+    /// Create a new terminal pane running a specific command.
+    ///
+    /// # Arguments
+    /// * `cx` - GPUI context
+    /// * `command` - The command to run (e.g., "btop", "neofetch")
+    /// * `args` - Arguments to pass to the command
+    ///
+    /// This is used for opening system utilities from the status bar.
+    pub fn new_with_command(cx: &mut Context<Self>, command: &str, args: &[&str]) -> Self {
+        let display_state = DisplayState::default();
+        let size = display_state.size;
+
+        let listener = Listener::new();
+        let config = Config::default();
+        let term = Term::new(config, &size, listener.clone());
+        let term = Arc::new(Mutex::new(term));
+        let processor = Arc::new(Mutex::new(Processor::new()));
+
+        let (pty, spawn_error) =
+            match PtyHandler::spawn_command(size.rows, size.cols, command, args, None) {
+                Ok(pty) => (Some(pty), None),
+                Err(e) => {
+                    tracing::error!("Failed to spawn command {}: {}", command, e);
+                    (None, Some(e.to_string()))
+                }
+            };
+
+        let focus_handle = cx.focus_handle().tab_stop(false);
+
+        let pane = Self {
+            pty: Arc::new(Mutex::new(pty)),
+            term,
+            processor,
+            listener,
+            display: Arc::new(RwLock::new(display_state)),
+            dragging: false,
+            focus_handle,
+            exit_emitted: false,
+        };
+
+        if let Some(error) = spawn_error {
+            let error_msg = format!(
+                "\x1b[31m\x1b[1mError: Failed to run '{}'\x1b[0m\r\n\r\n{}\r\n\r\n\
+                 \x1b[33mTip:\x1b[0m Install the command with: brew install {}\r\n",
+                command, error, command
+            );
+            let mut term = pane.term.lock();
+            let mut processor = pane.processor.lock();
+            processor.advance(&mut *term, error_msg.as_bytes());
+        }
+
+        // Start PTY output processing
+        let term_clone = pane.term.clone();
+        let processor_clone = pane.processor.clone();
+        let pty_clone = pane.pty.clone();
+
+        cx.spawn(async move |this, cx| {
+            const ACTIVE_INTERVAL: u64 = 4;
+            const IDLE_INTERVAL: u64 = 50;
+            const IDLE_THRESHOLD: u32 = 5;
+
+            let mut idle_count = 0u32;
+
+            loop {
+                let interval = if idle_count >= IDLE_THRESHOLD {
+                    IDLE_INTERVAL
+                } else {
+                    ACTIVE_INTERVAL
+                };
+
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(interval))
+                    .await;
+
+                let (should_notify, has_data, is_exited) = {
+                    let pty_guard = pty_clone.lock();
+                    if let Some(ref pty) = *pty_guard {
+                        let is_exited = pty.has_exited();
+                        let output_chunks = pty.read_output();
+                        drop(pty_guard);
+                        if !output_chunks.is_empty() {
+                            let mut term = term_clone.lock();
+                            let mut processor = processor_clone.lock();
+                            for chunk in output_chunks {
+                                processor.advance(&mut *term, &chunk);
+                            }
+                            (true, true, is_exited)
+                        } else {
+                            (is_exited, false, is_exited)
+                        }
+                    } else {
+                        (true, false, true)
+                    }
+                };
+
+                if has_data {
+                    idle_count = 0;
+                } else {
+                    idle_count = idle_count.saturating_add(1);
+                }
+
+                if should_notify {
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+
+                if is_exited {
+                    let _ = this.update(cx, |pane, cx| {
+                        if !pane.exit_emitted {
+                            pane.exit_emitted = true;
+                            cx.emit(TerminalExitEvent);
+                        }
+                    });
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        pane
+    }
+
     /// Send keyboard input to the PTY
     pub fn send_input(&mut self, input: &str) {
         let mut pty_guard = self.pty.lock();
@@ -336,6 +456,15 @@ impl TerminalPane {
             None => None,
             Some(pty) => pty.get_current_directory(),
         }
+    }
+
+    /// Get the name of the shell being used (e.g., "zsh", "bash").
+    pub fn shell_name(&self) -> Option<String> {
+        std::env::var("SHELL").ok().and_then(|s| {
+            std::path::Path::new(&s)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
     }
 
     /// Get the terminal title (set by OSC escape sequences)
@@ -440,13 +569,23 @@ impl TerminalPane {
         None
     }
 
-    /// Extract text content from a terminal row.
-    fn get_row_text(&self, row: usize) -> String {
+    /// Extract text content from a visual terminal row (accounting for scroll).
+    /// `visual_row` is 0 = top of viewport, not the grid line number.
+    fn get_row_text(&self, visual_row: usize) -> String {
         let term = self.term.lock();
         let grid = term.grid();
-        let line = Line(row as i32);
+        let display_offset = grid.display_offset() as i32;
 
-        if line.0 < 0 || line.0 >= grid.screen_lines() as i32 {
+        // Convert visual row to grid line (accounting for scroll)
+        let line = Line(visual_row as i32 - display_offset);
+
+        // Check bounds: grid supports negative lines for scrollback
+        // The valid range is roughly -history_size to screen_lines-1
+        let total_lines = grid.total_lines();
+        let screen_lines = grid.screen_lines() as i32;
+        let min_line = -(total_lines as i32 - screen_lines);
+
+        if line.0 < min_line || line.0 >= screen_lines {
             return String::new();
         }
 
@@ -514,9 +653,14 @@ impl TerminalPane {
             self.send_input(&seq);
         } else if event.button == MouseButton::Left {
             // Start text selection using alacritty's Selection
-            let point = TermPoint::new(Line(row as i32), Column(col));
+            // Convert visual row to grid line (accounting for scroll offset)
+            let mut term = self.term.lock();
+            let display_offset = term.grid().display_offset() as i32;
+            let line = Line(row as i32 - display_offset);
+            let point = TermPoint::new(line, Column(col));
             let selection = TermSelection::new(SelectionType::Simple, point, Side::Left);
-            self.term.lock().selection = Some(selection);
+            term.selection = Some(selection);
+            drop(term);
             self.dragging = true;
             cx.notify();
         }
@@ -557,10 +701,15 @@ impl TerminalPane {
         } else if event.button == MouseButton::Left {
             // End text selection
             if self.dragging {
-                let point = TermPoint::new(Line(row as i32), Column(col));
-                if let Some(ref mut selection) = self.term.lock().selection {
+                // Convert visual row to grid line (accounting for scroll offset)
+                let mut term = self.term.lock();
+                let display_offset = term.grid().display_offset() as i32;
+                let line = Line(row as i32 - display_offset);
+                let point = TermPoint::new(line, Column(col));
+                if let Some(ref mut selection) = term.selection {
                     selection.update(point, Side::Right);
                 }
+                drop(term);
                 self.dragging = false;
                 cx.notify();
             }
@@ -575,8 +724,12 @@ impl TerminalPane {
 
         // Update selection if dragging
         if self.dragging {
-            let point = TermPoint::new(Line(row as i32), Column(col));
-            if let Some(ref mut selection) = self.term.lock().selection {
+            // Convert visual row to grid line (accounting for scroll offset)
+            let mut term = self.term.lock();
+            let display_offset = term.grid().display_offset() as i32;
+            let line = Line(row as i32 - display_offset);
+            let point = TermPoint::new(line, Column(col));
+            if let Some(ref mut selection) = term.selection {
                 selection.update(point, Side::Right);
             }
             cx.notify();
@@ -1122,7 +1275,7 @@ impl TerminalPane {
         cx.notify();
     }
 
-    /// Handle dropped files - converts images to base64 data URLs for AI assistants
+    /// Handle dropped files - pastes file paths for AI assistants to read directly
     fn handle_file_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         let paths = paths.paths();
         if paths.is_empty() {
@@ -1132,61 +1285,17 @@ impl TerminalPane {
         let mut output = String::new();
 
         for path in paths {
-            // Check if it's an image file by extension
-            let is_image = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    matches!(
-                        ext.to_lowercase().as_str(),
-                        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
-                    )
-                })
-                .unwrap_or(false);
-
-            if is_image {
-                // Read and base64 encode image for AI assistants
-                match std::fs::read(path) {
-                    Ok(data) => {
-                        let mime = match path.extension().and_then(|e| e.to_str()) {
-                            Some("png") => "image/png",
-                            Some("jpg") | Some("jpeg") => "image/jpeg",
-                            Some("gif") => "image/gif",
-                            Some("webp") => "image/webp",
-                            Some("bmp") => "image/bmp",
-                            _ => "application/octet-stream",
-                        };
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-                        // Output as data URL (supported by Claude and other AI assistants)
-                        if !output.is_empty() {
-                            output.push(' ');
-                        }
-                        output.push_str(&format!("data:{};base64,{}", mime, encoded));
-                        tracing::info!("Encoded dropped image: {:?} ({} bytes)", path, data.len());
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read dropped file {:?}: {}", path, e);
-                        // Fall back to path
-                        if !output.is_empty() {
-                            output.push(' ');
-                        }
-                        output.push_str(&path.to_string_lossy());
-                    }
-                }
+            if !output.is_empty() {
+                output.push(' ');
+            }
+            // Quote paths with spaces
+            let path_str = path.to_string_lossy();
+            if path_str.contains(' ') {
+                output.push('"');
+                output.push_str(&path_str);
+                output.push('"');
             } else {
-                // Non-image file: just paste the path
-                if !output.is_empty() {
-                    output.push(' ');
-                }
-                // Quote paths with spaces
-                let path_str = path.to_string_lossy();
-                if path_str.contains(' ') {
-                    output.push('"');
-                    output.push_str(&path_str);
-                    output.push('"');
-                } else {
-                    output.push_str(&path_str);
-                }
+                output.push_str(&path_str);
             }
         }
 
