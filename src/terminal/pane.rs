@@ -631,6 +631,12 @@ impl TerminalPane {
         // Handle Cmd+key shortcuts
         if event.keystroke.modifiers.platform {
             match event.keystroke.key.as_str() {
+                "a" => {
+                    // Select all terminal content
+                    self.select_all();
+                    cx.notify();
+                    return;
+                }
                 "c" => {
                     // Copy selection
                     self.copy_selection(cx);
@@ -686,6 +692,17 @@ impl TerminalPane {
                 }
                 "right" => {
                     self.send_input("\x1bf"); // ESC + f = forward word
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Handle Shift+Arrow for text selection
+        if event.keystroke.modifiers.shift {
+            match event.keystroke.key.as_str() {
+                "left" | "right" | "up" | "down" => {
+                    self.handle_shift_arrow(event.keystroke.key.as_str(), cx);
                     return;
                 }
                 _ => {}
@@ -852,6 +869,93 @@ impl TerminalPane {
         if let Some(text) = self.get_selected_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    /// Select all terminal content (visible + scrollback history)
+    fn select_all(&mut self) {
+        let mut term = self.term.lock();
+        let cols = term.columns();
+
+        // Get the topmost line (including scrollback) and bottommost line
+        let topmost = term.topmost_line();
+        let bottommost = term.bottommost_line();
+
+        // Create selection from top-left to bottom-right
+        let start = TermPoint::new(topmost, Column(0));
+        let end = TermPoint::new(bottommost, Column(cols.saturating_sub(1)));
+
+        let mut selection = TermSelection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        term.selection = Some(selection);
+    }
+
+    /// Handle Shift+Arrow for text selection
+    fn handle_shift_arrow(&mut self, direction: &str, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        let cols = term.columns();
+        let lines = term.screen_lines();
+
+        // Get current selection end from renderable content, or use cursor position
+        let content = term.renderable_content();
+        let (start_point, current_end) = if let Some(sel_range) = content.selection {
+            // Use existing selection's start as anchor, end as current position
+            (
+                TermPoint::new(sel_range.start.line, sel_range.start.column),
+                TermPoint::new(sel_range.end.line, sel_range.end.column),
+            )
+        } else {
+            // No selection - start from cursor
+            let cursor = content.cursor.point;
+            (cursor, cursor)
+        };
+
+        // Calculate new end point based on direction
+        let topmost = term.topmost_line();
+        let bottommost = term.bottommost_line();
+
+        let new_end = match direction {
+            "left" => {
+                if current_end.column.0 > 0 {
+                    TermPoint::new(current_end.line, Column(current_end.column.0 - 1))
+                } else if current_end.line.0 > topmost.0 {
+                    TermPoint::new(Line(current_end.line.0 - 1), Column(cols.saturating_sub(1)))
+                } else {
+                    current_end
+                }
+            }
+            "right" => {
+                if current_end.column.0 < cols.saturating_sub(1) {
+                    TermPoint::new(current_end.line, Column(current_end.column.0 + 1))
+                } else if current_end.line.0 < bottommost.0 {
+                    TermPoint::new(Line(current_end.line.0 + 1), Column(0))
+                } else {
+                    current_end
+                }
+            }
+            "up" => {
+                if current_end.line.0 > topmost.0 {
+                    TermPoint::new(Line(current_end.line.0 - 1), current_end.column)
+                } else {
+                    current_end
+                }
+            }
+            "down" => {
+                if current_end.line.0 < (lines as i32 - 1) {
+                    TermPoint::new(Line(current_end.line.0 + 1), current_end.column)
+                } else {
+                    current_end
+                }
+            }
+            _ => current_end,
+        };
+
+        // Create new selection from start to new end
+        let mut selection = TermSelection::new(SelectionType::Simple, start_point, Side::Left);
+        selection.update(new_end, Side::Right);
+        term.selection = Some(selection);
+
+        drop(term);
+        cx.notify();
     }
 
     /// Handle dropped files - converts images to base64 data URLs for AI assistants
