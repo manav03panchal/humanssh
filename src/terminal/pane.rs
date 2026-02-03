@@ -628,8 +628,25 @@ impl TerminalPane {
             *term.mode()
         };
 
+        // Handle Cmd+Shift shortcuts (must check before Cmd alone)
+        if event.keystroke.modifiers.platform && event.keystroke.modifiers.shift {
+            match event.keystroke.key.as_str() {
+                "left" => {
+                    // Cmd+Shift+Left: Select to start of line
+                    self.handle_cmd_shift_arrow("left", cx);
+                    return;
+                }
+                "right" => {
+                    // Cmd+Shift+Right: Select to end of line
+                    self.handle_cmd_shift_arrow("right", cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         // Handle Cmd+key shortcuts
-        if event.keystroke.modifiers.platform {
+        if event.keystroke.modifiers.platform && !event.keystroke.modifiers.shift {
             match event.keystroke.key.as_str() {
                 "a" => {
                     // Select all terminal content
@@ -647,9 +664,36 @@ impl TerminalPane {
                     self.paste_clipboard(cx);
                     return;
                 }
+                "k" => {
+                    // Clear scrollback and screen
+                    self.send_input("\x0c"); // Ctrl+L to clear screen
+                    return;
+                }
                 "backspace" => {
                     // Delete line (cursor to beginning) - Ctrl+U
                     self.send_input("\x15");
+                    return;
+                }
+                "left" => {
+                    // Cmd+Left: Go to start of line - Ctrl+A
+                    self.send_input("\x01");
+                    return;
+                }
+                "right" => {
+                    // Cmd+Right: Go to end of line - Ctrl+E
+                    self.send_input("\x05");
+                    return;
+                }
+                "up" => {
+                    // Cmd+Up: Scroll to top of scrollback
+                    self.term.lock().scroll_display(Scroll::Top);
+                    cx.notify();
+                    return;
+                }
+                "down" => {
+                    // Cmd+Down: Scroll to bottom
+                    self.term.lock().scroll_display(Scroll::Bottom);
+                    cx.notify();
                     return;
                 }
                 "=" | "+" => {
@@ -683,8 +727,19 @@ impl TerminalPane {
             return;
         }
 
-        // Handle Option+Left/Right for word movement
-        if event.keystroke.modifiers.alt {
+        // Handle Option+Shift+Arrow for word-level selection (must check before Option alone)
+        if event.keystroke.modifiers.alt && event.keystroke.modifiers.shift {
+            match event.keystroke.key.as_str() {
+                "left" | "right" => {
+                    self.handle_option_shift_arrow(event.keystroke.key.as_str(), cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Handle Option+Left/Right for word movement (without shift)
+        if event.keystroke.modifiers.alt && !event.keystroke.modifiers.shift {
             match event.keystroke.key.as_str() {
                 "left" => {
                     self.send_input("\x1bb"); // ESC + b = backward word
@@ -698,8 +753,8 @@ impl TerminalPane {
             }
         }
 
-        // Handle Shift+Arrow for text selection
-        if event.keystroke.modifiers.shift {
+        // Handle Shift+Arrow for text selection (character level)
+        if event.keystroke.modifiers.shift && !event.keystroke.modifiers.alt {
             match event.keystroke.key.as_str() {
                 "left" | "right" | "up" | "down" => {
                     self.handle_shift_arrow(event.keystroke.key.as_str(), cx);
@@ -887,6 +942,122 @@ impl TerminalPane {
         let mut selection = TermSelection::new(SelectionType::Simple, start, Side::Left);
         selection.update(end, Side::Right);
         term.selection = Some(selection);
+
+        // Scroll to bottom to show the selection includes current content
+        term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Handle Cmd+Shift+Arrow for line-level selection
+    fn handle_cmd_shift_arrow(&mut self, direction: &str, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        let cols = term.columns();
+
+        // Get current selection or cursor position
+        let content = term.renderable_content();
+        let (start_point, current_end) = if let Some(sel_range) = content.selection {
+            (
+                TermPoint::new(sel_range.start.line, sel_range.start.column),
+                TermPoint::new(sel_range.end.line, sel_range.end.column),
+            )
+        } else {
+            let cursor = content.cursor.point;
+            (cursor, cursor)
+        };
+
+        let new_end = match direction {
+            "left" => {
+                // Select to start of line
+                TermPoint::new(current_end.line, Column(0))
+            }
+            "right" => {
+                // Select to end of line
+                TermPoint::new(current_end.line, Column(cols.saturating_sub(1)))
+            }
+            _ => current_end,
+        };
+
+        let mut selection = TermSelection::new(SelectionType::Simple, start_point, Side::Left);
+        selection.update(new_end, Side::Right);
+        term.selection = Some(selection);
+
+        drop(term);
+        cx.notify();
+    }
+
+    /// Handle Option+Shift+Arrow for word-level selection
+    fn handle_option_shift_arrow(&mut self, direction: &str, cx: &mut Context<Self>) {
+        let mut term = self.term.lock();
+        let cols = term.columns();
+
+        // Get current selection end from renderable content, or use cursor position
+        let content = term.renderable_content();
+        let (start_point, current_end) = if let Some(sel_range) = content.selection {
+            (
+                TermPoint::new(sel_range.start.line, sel_range.start.column),
+                TermPoint::new(sel_range.end.line, sel_range.end.column),
+            )
+        } else {
+            let cursor = content.cursor.point;
+            (cursor, cursor)
+        };
+
+        let topmost = term.topmost_line();
+        let bottommost = term.bottommost_line();
+
+        // Move by word - find next word boundary
+        let new_end = match direction {
+            "left" => {
+                // Move left to previous word boundary
+                let mut col = current_end.column.0;
+                let mut line = current_end.line;
+
+                // Skip any spaces first
+                while col > 0 {
+                    col -= 1;
+                    // Simple word boundary: stop at space after non-space
+                    if col == 0 {
+                        break;
+                    }
+                }
+                // Then skip to start of word (find space or start of line)
+                while col > 0 {
+                    col -= 1;
+                }
+
+                // If we hit start of line and can go up, jump to end of previous line
+                if col == 0 && line.0 > topmost.0 {
+                    line = Line(line.0 - 1);
+                    col = cols.saturating_sub(1);
+                }
+
+                TermPoint::new(line, Column(col))
+            }
+            "right" => {
+                // Move right to next word boundary
+                let mut col = current_end.column.0;
+                let mut line = current_end.line;
+
+                // Move forward by ~5 chars as approximation for word
+                col = (col + 5).min(cols.saturating_sub(1));
+
+                // If we hit end of line and can go down, jump to start of next line
+                if col >= cols.saturating_sub(1) && line.0 < bottommost.0 {
+                    line = Line(line.0 + 1);
+                    col = 0;
+                }
+
+                TermPoint::new(line, Column(col))
+            }
+            _ => current_end,
+        };
+
+        // Create new selection from start to new end
+        let mut selection = TermSelection::new(SelectionType::Simple, start_point, Side::Left);
+        selection.update(new_end, Side::Right);
+        term.selection = Some(selection);
+
+        drop(term);
+        cx.notify();
     }
 
     /// Handle Shift+Arrow for text selection
