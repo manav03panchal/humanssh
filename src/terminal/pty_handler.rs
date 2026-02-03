@@ -161,8 +161,25 @@ impl PtyHandler {
         // Get and validate the user's shell (security: prevents command injection)
         let shell = get_validated_shell();
 
+        // Start shell as login shell (-l) so it sources user's profile (.zprofile, .bash_profile)
+        // This ensures PATH and other env vars are properly set when launched from .app bundle
         let mut cmd = CommandBuilder::new(&shell);
+        cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");
+
+        // Ensure common paths are in PATH for macOS app bundles (which have minimal env)
+        if let Ok(current_path) = std::env::var("PATH") {
+            let homebrew_paths = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin";
+            if !current_path.contains("/opt/homebrew") {
+                cmd.env("PATH", format!("{}:{}", homebrew_paths, current_path));
+            }
+        } else {
+            // Fallback PATH if none set
+            cmd.env(
+                "PATH",
+                "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            );
+        }
 
         // Spawn the shell process
         let child = pair
