@@ -43,5 +43,5 @@ mod pane;
 mod pty_handler;
 pub mod types;
 
-pub use pane::TerminalPane;
+pub use pane::{TerminalExitEvent, TerminalPane};
 pub use pty_handler::PtyHandler;

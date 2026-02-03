@@ -92,6 +92,7 @@ impl PaneKind {
     }
 
     /// Check if the pane's underlying process has exited.
+    #[cfg_attr(test, allow(dead_code))]
     pub fn has_exited(&self, cx: &App) -> bool {
         match self {
             PaneKind::Terminal(terminal) => terminal.read(cx).has_exited(),

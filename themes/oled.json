@@ -1,0 +1,37 @@
+{
+  "$schema": "https://raw.githubusercontent.com/longbridgeapp/gpui-component/main/crates/story/themes/schema.json",
+  "name": "OLED",
+  "author": "HumanSSH",
+  "themes": [
+    {
+      "name": "OLED Black",
+      "mode": "dark",
+      "colors": {
+        "background": "#000000",
+        "foreground": "#e0e0e0",
+        "border": "#1a1a1a",
+        "accent.background": "#89b4fa",
+        "accent.foreground": "#000000",
+        "primary.background": "#89b4fa",
+        "primary.foreground": "#000000",
+        "secondary.background": "#1a1a1a",
+        "secondary.foreground": "#e0e0e0",
+        "muted.foreground": "#666666",
+        "title_bar.background": "#000000",
+        "tab.active.background": "#1a1a1a",
+        "tab.inactive.background": "#000000",
+        "panel.background": "#000000",
+        "list.active.background": "#1a1a1a",
+        "list.hover.background": "#262626",
+        "base.red": "#ff6b6b",
+        "base.green": "#69db7c",
+        "base.yellow": "#ffd43b",
+        "base.blue": "#74c0fc",
+        "base.magenta": "#da77f2",
+        "base.cyan": "#66d9e8",
+        "caret": "#ffffff",
+        "selection": "#333333"
+      }
+    }
+  ]
+}

@@ -158,8 +158,11 @@ impl PaneNode {
     /// Removes a pane from the tree by its UUID.
     ///
     /// When a leaf is removed, its parent split is replaced by the remaining sibling,
-    /// effectively "promoting" it up the tree. Returns the removed node if found.
-    pub fn remove(&mut self, target_id: Uuid) -> Option<PaneNode> {
+    /// effectively "promoting" it up the tree.
+    ///
+    /// Returns `Some((sibling_id, removed_node))` where `sibling_id` is the first leaf
+    /// of the promoted sibling (useful for focusing after removal).
+    pub fn remove(&mut self, target_id: Uuid) -> Option<(Uuid, PaneNode)> {
         // First check what action to take without borrowing mutably
         let action = match self {
             PaneNode::Leaf { id, .. } => {
@@ -172,7 +175,8 @@ impl PaneNode {
                 // Check if first child is the target leaf
                 if let PaneNode::Leaf { id, .. } = first.as_ref() {
                     if *id == target_id {
-                        Some(("promote_second", second.clone()))
+                        let sibling_id = second.first_leaf_id();
+                        Some((sibling_id, second.clone()))
                     } else {
                         None
                     }
@@ -183,7 +187,8 @@ impl PaneNode {
                     // Check if second child is the target leaf
                     if let PaneNode::Leaf { id, .. } = second.as_ref() {
                         if *id == target_id {
-                            Some(("promote_first", first.clone()))
+                            let sibling_id = first.first_leaf_id();
+                            Some((sibling_id, first.clone()))
                         } else {
                             None
                         }
@@ -194,9 +199,9 @@ impl PaneNode {
             }
         };
 
-        if let Some((_, replacement)) = action {
+        if let Some((sibling_id, replacement)) = action {
             let old = std::mem::replace(self, *replacement);
-            return Some(old);
+            return Some((sibling_id, old));
         }
 
         // Recurse into children

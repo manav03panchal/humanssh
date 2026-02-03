@@ -12,6 +12,7 @@ use super::types::{
 use super::PtyHandler;
 use crate::theme::{terminal_colors, TerminalColors};
 use alacritty_terminal::event::{Event, EventListener};
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line, Point as TermPoint, Side};
 use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
@@ -107,6 +108,11 @@ impl EventListener for Listener {
     }
 }
 
+/// Event emitted when the terminal process exits.
+/// Workspace subscribes to this to automatically clean up dead panes.
+#[derive(Clone, Debug)]
+pub struct TerminalExitEvent;
+
 /// Terminal pane that renders a PTY session.
 ///
 /// Manages the PTY process, terminal emulator state, and rendering.
@@ -130,7 +136,11 @@ pub struct TerminalPane {
     dragging: bool,
     /// Focus handle for keyboard input routing
     pub focus_handle: FocusHandle,
+    /// Whether exit event has been emitted (to avoid duplicate events)
+    exit_emitted: bool,
 }
+
+impl EventEmitter<TerminalExitEvent> for TerminalPane {}
 
 impl TerminalPane {
     /// Create a new terminal pane with the user's default shell.
@@ -168,6 +178,7 @@ impl TerminalPane {
             display: Arc::new(RwLock::new(display_state)),
             dragging: false,
             focus_handle,
+            exit_emitted: false,
         };
 
         // Display error message in terminal if PTY spawn failed
@@ -211,9 +222,10 @@ impl TerminalPane {
                     .timer(std::time::Duration::from_millis(interval))
                     .await;
 
-                let (should_notify, has_data) = {
+                let (should_notify, has_data, is_exited) = {
                     let pty_guard = pty_clone.lock();
                     if let Some(ref pty) = *pty_guard {
+                        let is_exited = pty.has_exited();
                         let output_chunks = pty.read_output();
                         drop(pty_guard);
                         if !output_chunks.is_empty() {
@@ -222,12 +234,12 @@ impl TerminalPane {
                             for chunk in output_chunks {
                                 processor.advance(&mut *term, &chunk);
                             }
-                            (true, true)
+                            (true, true, is_exited)
                         } else {
-                            (false, false)
+                            (is_exited, false, is_exited) // Notify on exit too
                         }
                     } else {
-                        (false, false)
+                        (true, false, true) // PTY is None, consider it exited
                     }
                 };
 
@@ -240,6 +252,17 @@ impl TerminalPane {
 
                 if should_notify {
                     let _ = this.update(cx, |_, cx| cx.notify());
+                }
+
+                // Check if process exited and emit event
+                if is_exited {
+                    let _ = this.update(cx, |pane, cx| {
+                        if !pane.exit_emitted {
+                            pane.exit_emitted = true;
+                            cx.emit(TerminalExitEvent);
+                        }
+                    });
+                    break; // Stop polling after exit
                 }
             }
         })
@@ -328,11 +351,110 @@ impl TerminalPane {
         }
     }
 
+    /// Extract URL at the given column position from a line of text.
+    /// Returns the URL if the column is within a URL boundary.
+    fn find_url_at_position(line: &str, col: usize) -> Option<String> {
+        // Characters that can appear in URLs (simplified set)
+        const URL_CHARS: &str =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%";
+
+        // Work entirely with characters (not bytes) to match terminal column positions
+        let chars: Vec<char> = line.chars().collect();
+        let line_len = chars.len();
+        let prefix_chars_https: Vec<char> = "https://".chars().collect();
+        let prefix_chars_http: Vec<char> = "http://".chars().collect();
+
+        for prefix_chars in [&prefix_chars_https, &prefix_chars_http] {
+            let prefix_len = prefix_chars.len();
+
+            // Search for prefix using character-based matching (not byte-based)
+            let mut search_start = 0;
+            while search_start + prefix_len <= line_len {
+                // Find prefix by comparing characters directly
+                let url_start = (search_start..=line_len - prefix_len).find(|&i| {
+                    chars[i..i + prefix_len]
+                        .iter()
+                        .zip(prefix_chars.iter())
+                        .all(|(a, b)| a == b)
+                });
+
+                let Some(url_start) = url_start else {
+                    break;
+                };
+
+                // Find the end of the URL (first non-URL character or end of line)
+                let mut url_end = url_start + prefix_len;
+                while url_end < line_len && URL_CHARS.contains(chars[url_end]) {
+                    url_end += 1;
+                }
+
+                // Strip trailing punctuation that's unlikely to be part of the URL
+                while url_end > url_start + prefix_len {
+                    let last_char = chars[url_end - 1];
+                    if matches!(
+                        last_char,
+                        '.' | ',' | ';' | ':' | ')' | ']' | '>' | '\'' | '"'
+                    ) {
+                        url_end -= 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                // Check if clicked column is within this URL
+                if col >= url_start && col < url_end {
+                    return Some(chars[url_start..url_end].iter().collect());
+                }
+
+                search_start = url_end;
+            }
+        }
+        None
+    }
+
+    /// Extract text content from a terminal row.
+    fn get_row_text(&self, row: usize) -> String {
+        let term = self.term.lock();
+        let grid = term.grid();
+        let line = Line(row as i32);
+
+        if line.0 < 0 || line.0 >= grid.screen_lines() as i32 {
+            return String::new();
+        }
+
+        let cols = grid.columns();
+        let row_data = &grid[line];
+        (0..cols).map(|c| row_data[Column(c)].c).collect()
+    }
+
     /// Handle mouse down event
     fn handle_mouse_down(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
         let Some((col, row)) = self.pixel_to_cell(event.position) else {
             return;
         };
+
+        // Handle Cmd+Click for URL opening (before other handlers)
+        if event.modifiers.platform && event.button == MouseButton::Left {
+            let line_text = self.get_row_text(row);
+            if let Some(url) = Self::find_url_at_position(&line_text, col) {
+                // Open URL in default browser
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open").arg(&url).spawn();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
+                }
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("cmd")
+                        .args(["/C", "start", "", &url])
+                        .spawn();
+                }
+                return;
+            }
+        }
 
         let mode = {
             let term = self.term.lock();
@@ -828,177 +950,10 @@ impl TerminalPane {
     }
 }
 
-/// Create a TextRun with proper styling based on cell flags
-fn create_text_run(len: usize, font_family: &SharedString, fg: Hsla, flags: CellFlags) -> TextRun {
-    // Determine font weight
-    let weight = if flags.contains(CellFlags::BOLD) {
-        FontWeight::BOLD
-    } else {
-        FontWeight::NORMAL
-    };
-
-    // Determine font style
-    let style = if flags.contains(CellFlags::ITALIC) {
-        FontStyle::Italic
-    } else {
-        FontStyle::Normal
-    };
-
-    // Determine underline style
-    let underline = if flags.intersects(
-        CellFlags::UNDERLINE
-            | CellFlags::DOUBLE_UNDERLINE
-            | CellFlags::UNDERCURL
-            | CellFlags::DOTTED_UNDERLINE
-            | CellFlags::DASHED_UNDERLINE,
-    ) {
-        Some(UnderlineStyle {
-            thickness: px(1.0),
-            color: Some(fg),
-            wavy: flags.contains(CellFlags::UNDERCURL),
-        })
-    } else {
-        None
-    };
-
-    // Determine strikethrough style
-    let strikethrough = if flags.contains(CellFlags::STRIKEOUT) {
-        Some(StrikethroughStyle {
-            thickness: px(1.0),
-            color: Some(fg),
-        })
-    } else {
-        None
-    };
-
-    TextRun {
-        len,
-        font: Font {
-            family: font_family.clone(),
-            features: FontFeatures::default(),
-            fallbacks: None,
-            weight,
-            style,
-        },
-        color: fg,
-        background_color: None,
-        underline,
-        strikethrough,
-    }
-}
-
-/// Shape text by rows (batched) to reduce allocations.
-/// Instead of shaping each character individually (O(cells) allocations),
-/// shapes entire rows (O(rows) allocations).
-fn shape_rows_batched(
-    cells: &[RenderCell],
-    rows: usize,
-    cols: usize,
-    font_family: &SharedString,
-    font_size: Pixels,
-    window: &mut Window,
-) -> Vec<ShapedLine> {
-    // Group cells by row
-    let mut row_cells: Vec<Vec<&RenderCell>> = vec![Vec::new(); rows];
-    for cell in cells {
-        if cell.row < rows {
-            row_cells[cell.row].push(cell);
-        }
-    }
-
-    // Shape each row
-    row_cells
-        .into_iter()
-        .map(|mut row| {
-            if row.is_empty() {
-                // Empty row - shape a single space to maintain line height
-                let run = create_text_run(1, font_family, Hsla::default(), CellFlags::empty());
-                window
-                    .text_system()
-                    .shape_line(" ".into(), font_size, &[run], None)
-            } else {
-                // Sort by column to ensure correct order
-                row.sort_by_key(|c| c.col);
-
-                // Build the row string and runs
-                // CRITICAL: TextRun.len is in BYTES, and runs MUST cover all bytes in text
-                // Otherwise GPUI may skip rendering parts of the text
-                let mut text = String::with_capacity(cols);
-                let mut runs: Vec<TextRun> = Vec::new();
-
-                let mut current_col = 0;
-                for cell in row {
-                    // Fill gaps with spaces - each space is 1 byte
-                    let gap = cell.col.saturating_sub(current_col);
-                    if gap > 0 {
-                        // Add spaces to text
-                        for _ in 0..gap {
-                            text.push(' ');
-                        }
-
-                        // MUST add spaces to a run so they get rendered
-                        // Use the upcoming cell's color so run can potentially merge
-                        runs.push(create_text_run(
-                            gap,
-                            font_family,
-                            cell.fg,
-                            CellFlags::empty(),
-                        ));
-                    }
-
-                    current_col = cell.col;
-
-                    // Add the cell character
-                    let char_len = cell.c.len_utf8();
-
-                    // Check if we can extend the previous run (same color AND flags)
-                    let can_extend = runs.last().is_some_and(|last_run| {
-                        last_run.color == cell.fg
-                            && last_run.font.weight
-                                == if cell.flags.contains(CellFlags::BOLD) {
-                                    FontWeight::BOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                }
-                    });
-
-                    if can_extend {
-                        // Extend previous run
-                        runs.last_mut().unwrap().len += char_len;
-                    } else {
-                        // Start new run for this character
-                        runs.push(create_text_run(char_len, font_family, cell.fg, cell.flags));
-                    }
-
-                    text.push(cell.c);
-                    current_col += 1;
-                }
-
-                // Handle empty text
-                if text.is_empty() {
-                    text.push(' ');
-                    runs.push(create_text_run(
-                        1,
-                        font_family,
-                        Hsla::default(),
-                        CellFlags::empty(),
-                    ));
-                }
-
-                window
-                    .text_system()
-                    .shape_line(text.into(), font_size, &runs, None)
-            }
-        })
-        .collect()
-}
-
 /// Build render data from terminal state - collects individual cells for precise positioning
 fn build_render_data(
     term: &Term<Listener>,
     theme: &TerminalColors,
-    cols: usize,
-    rows: usize,
     _font_family: SharedString,
 ) -> RenderData {
     let content = term.renderable_content();
@@ -1018,16 +973,22 @@ fn build_render_data(
     let cursor_col = content.cursor.point.column.0;
     let cursor_shape = content.cursor.shape;
 
-    let cursor_info = if cursor_line >= 0 && (cursor_line as usize) < rows && cursor_col < cols {
-        Some(CursorInfo {
-            row: cursor_line as usize,
-            col: cursor_col,
-            shape: cursor_shape,
-            color: theme.cursor,
-        })
-    } else {
-        None
-    };
+    // Use terminal's actual dimensions for cursor bounds check
+    // to avoid issues when display size and terminal size are temporarily out of sync
+    let term_cols = term.columns();
+    let term_rows = term.screen_lines();
+
+    let cursor_info =
+        if cursor_line >= 0 && (cursor_line as usize) < term_rows && cursor_col < term_cols {
+            Some(CursorInfo {
+                row: cursor_line as usize,
+                col: cursor_col,
+                shape: cursor_shape,
+                color: theme.cursor,
+            })
+        } else {
+            None
+        };
 
     // Process cells from terminal content
     for cell in content.display_iter {
@@ -1035,7 +996,7 @@ fn build_render_data(
         let row = point.line.0 as usize;
         let col = point.column.0;
 
-        if row >= rows || col >= cols {
+        if row >= term_rows || col >= term_cols {
             continue;
         }
 
@@ -1070,14 +1031,10 @@ fn build_render_data(
             fg = bg;
         }
 
-        // Apply cursor styling for block cursor
-        let is_cursor = cursor_info.is_some_and(|c| c.row == row && c.col == col);
-        let is_block_cursor = is_cursor
-            && cursor_info
-                .is_some_and(|c| matches!(c.shape, CursorShape::Block | CursorShape::HollowBlock));
-        if is_block_cursor {
-            fg = theme.background;
-        }
+        // Apply cursor styling for block cursor - don't change fg color
+        // The hollow block cursor is drawn in the paint phase, text should remain visible
+        // (Previous code set fg to background which made text invisible inside the cursor)
+        let _is_cursor = cursor_info.is_some_and(|c| c.row == row && c.col == col);
 
         // Merge non-default backgrounds on-the-fly
         if bg != default_bg {
@@ -1237,8 +1194,8 @@ impl Render for TerminalPane {
             .child(
                 // Canvas for GPU-accelerated terminal rendering
                 canvas(
-                    // Prepaint: compute render data and shape individual cells
-                    move |bounds, window, _cx| {
+                    // Prepaint: compute render data
+                    move |bounds, _window, _cx| {
                         // Get display state and update bounds
                         let (cell_width, cell_height, current_font_size) = {
                             let mut display = display_arc.write();
@@ -1299,9 +1256,9 @@ impl Render for TerminalPane {
                         }
 
                         // Get current size for rendering
-                        let (cols, rows) = {
+                        let cols = {
                             let display = display_arc.read();
-                            (display.size.cols as usize, display.size.rows as usize)
+                            display.size.cols as usize
                         };
 
                         // Build render data from terminal state and get selection
@@ -1309,50 +1266,39 @@ impl Render for TerminalPane {
                         let render_data = build_render_data(
                             &term_guard,
                             &colors_clone,
-                            cols,
-                            rows,
                             font_family_clone.clone(),
                         );
                         // Get selection from renderable content (already normalized)
                         let selection_range = term_guard.renderable_content().selection;
                         drop(term_guard);
 
-                        // Shape text by row to reduce allocations (O(rows) instead of O(cells))
-                        let font_size = px(current_font_size);
-                        let shaped_rows = shape_rows_batched(
-                            &render_data.cells,
-                            rows,
-                            cols,
-                            &font_family_clone,
-                            font_size,
-                            window,
-                        );
-
                         // Use theme selection color with alpha for transparency
                         let selection_color = colors_clone.selection;
 
                         (
                             render_data,
-                            shaped_rows,
                             bounds,
                             cell_width,
                             cell_height,
                             selection_range,
                             cols,
                             selection_color,
+                            font_family_clone,
+                            current_font_size,
                         )
                     },
-                    // Paint: draw backgrounds and row-batched text
+                    // Paint: draw backgrounds and cell-by-cell text
                     move |_bounds, data, window, cx| {
                         let (
                             render_data,
-                            shaped_rows,
                             bounds,
                             cell_width,
                             cell_height,
                             selection_range,
                             cols,
                             selection_color,
+                            font_family,
+                            font_size,
                         ) = data;
 
                         let origin = bounds.origin;
@@ -1410,17 +1356,47 @@ impl Render for TerminalPane {
                             }
                         }
 
-                        // 2. Paint each row of text (batched for performance)
-                        for (row_idx, shaped_line) in shaped_rows.iter().enumerate() {
-                            let x = origin.x + px(PADDING);
-                            let y = origin.y + px(PADDING + row_idx as f32 * cell_height);
-                            let _ = shaped_line.paint(Point::new(x, y), line_height, window, cx);
+                        // 2. Paint each cell at its grid position (like Alacritty/Ghostty)
+                        // This ensures cursor and text are perfectly aligned
+                        for cell in &render_data.cells {
+                            let x = origin.x + px(PADDING + cell.col as f32 * cell_width);
+                            let y = origin.y + px(PADDING + cell.row as f32 * cell_height);
+
+                            // Shape and paint this single character
+                            let text: SharedString = cell.c.to_string().into();
+                            let font = Font {
+                                family: font_family.clone(),
+                                features: FontFeatures::default(),
+                                fallbacks: None,
+                                weight: if cell.flags.contains(CellFlags::BOLD) {
+                                    FontWeight::BOLD
+                                } else {
+                                    FontWeight::NORMAL
+                                },
+                                style: if cell.flags.contains(CellFlags::ITALIC) {
+                                    FontStyle::Italic
+                                } else {
+                                    FontStyle::Normal
+                                },
+                            };
+                            let run = TextRun {
+                                len: cell.c.len_utf8(),
+                                font,
+                                color: cell.fg,
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            let shaped =
+                                window
+                                    .text_system()
+                                    .shape_line(text, px(font_size), &[run], None);
+                            let _ = shaped.paint(Point::new(x, y), line_height, window, cx);
                         }
 
                         // 3. Paint cursor based on shape
                         if let Some(cursor) = render_data.cursor {
-                            let cursor_x =
-                                origin.x + px(PADDING + (cursor.col + 1) as f32 * cell_width);
+                            let cursor_x = origin.x + px(PADDING + cursor.col as f32 * cell_width);
                             let cursor_y = origin.y + px(PADDING + cursor.row as f32 * cell_height);
 
                             match cursor.shape {
@@ -1585,6 +1561,66 @@ mod tests {
     use alacritty_terminal::grid::Dimensions;
     use pretty_assertions::assert_eq;
     use test_case::test_case;
+
+    /// Create a TextRun with proper styling based on cell flags (test helper)
+    fn create_text_run(
+        len: usize,
+        font_family: &SharedString,
+        fg: Hsla,
+        flags: CellFlags,
+    ) -> TextRun {
+        let weight = if flags.contains(CellFlags::BOLD) {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        };
+
+        let style = if flags.contains(CellFlags::ITALIC) {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        };
+
+        let underline = if flags.intersects(
+            CellFlags::UNDERLINE
+                | CellFlags::DOUBLE_UNDERLINE
+                | CellFlags::UNDERCURL
+                | CellFlags::DOTTED_UNDERLINE
+                | CellFlags::DASHED_UNDERLINE,
+        ) {
+            Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: Some(fg),
+                wavy: flags.contains(CellFlags::UNDERCURL),
+            })
+        } else {
+            None
+        };
+
+        let strikethrough = if flags.contains(CellFlags::STRIKEOUT) {
+            Some(StrikethroughStyle {
+                thickness: px(1.0),
+                color: Some(fg),
+            })
+        } else {
+            None
+        };
+
+        TextRun {
+            len,
+            font: Font {
+                family: font_family.clone(),
+                features: FontFeatures::default(),
+                fallbacks: None,
+                weight,
+                style,
+            },
+            color: fg,
+            background_color: None,
+            underline,
+            strikethrough,
+        }
+    }
 
     // ============================================================================
     // Unit Tests for Pure Functions and Data Structures
@@ -2750,5 +2786,146 @@ mod tests {
 
         let neg2 = -1.9_f32;
         assert_eq!(neg2.floor(), -2.0);
+    }
+
+    // ========================================================================
+    // URL Detection Tests
+    // ========================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_basic_https() {
+        let line = "Check out https://example.com for more info";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 10),
+            Some("https://example.com".to_string())
+        );
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 28),
+            Some("https://example.com".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_basic_http() {
+        let line = "Visit http://example.com today";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 6),
+            Some("http://example.com".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_with_path() {
+        let line = "See https://github.com/user/repo/blob/main/file.rs";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 20),
+            Some("https://github.com/user/repo/blob/main/file.rs".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_with_query_params() {
+        let line = "Link: https://search.com/q?query=test&page=1";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 10),
+            Some("https://search.com/q?query=test&page=1".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_strips_trailing_punctuation() {
+        // Period at end
+        let line = "Check https://example.com.";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 10),
+            Some("https://example.com".to_string())
+        );
+
+        // Comma at end
+        let line = "See https://example.com, then continue";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 10),
+            Some("https://example.com".to_string())
+        );
+
+        // Closing paren at end (common in markdown)
+        let line = "(https://example.com)";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 5),
+            Some("https://example.com".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_no_url() {
+        let line = "This line has no URLs";
+        assert_eq!(TerminalPane::find_url_at_position(line, 5), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_click_outside_url() {
+        let line = "Before https://example.com after";
+        // Click on "Before"
+        assert_eq!(TerminalPane::find_url_at_position(line, 0), None);
+        // Click on "after"
+        assert_eq!(TerminalPane::find_url_at_position(line, 28), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_multiple_urls() {
+        let line = "First https://a.com then https://b.com end";
+        // Click on first URL
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 8),
+            Some("https://a.com".to_string())
+        );
+        // Click on second URL
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 28),
+            Some("https://b.com".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_with_port() {
+        let line = "Local: http://localhost:8080/api";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 10),
+            Some("http://localhost:8080/api".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_with_fragment() {
+        let line = "Docs: https://docs.rs/crate#section";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 10),
+            Some("https://docs.rs/crate#section".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_with_unicode_before() {
+        // Emoji before URL (multi-byte character)
+        let line = "🚀 Check http://localhost:4321/ for updates";
+        // The emoji takes 1 character position, so URL starts at char 9
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 9),
+            Some("http://localhost:4321/".to_string())
+        );
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 15),
+            Some("http://localhost:4321/".to_string())
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_find_url_with_ansi_prompt() {
+        // Simulate a prompt line with URL
+        let line = "~/projects ➜ http://localhost:8080/api";
+        assert_eq!(
+            TerminalPane::find_url_at_position(line, 15),
+            Some("http://localhost:8080/api".to_string())
+        );
     }
 }
