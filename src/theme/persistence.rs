@@ -204,6 +204,7 @@ pub fn save_window_bounds(bounds: WindowBoundsConfig) {
 }
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::{settings, window_limits, Settings, WindowBoundsConfig};
     use tempfile::TempDir;

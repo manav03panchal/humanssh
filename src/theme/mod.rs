@@ -165,6 +165,7 @@ fn find_themes_dir() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::clone_on_copy)]
 mod tests {
     use super::{
         find_themes_dir, load_settings, load_window_bounds, terminal_colors, Settings, SwitchFont,

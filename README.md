@@ -14,7 +14,7 @@ A fast, cross-platform terminal emulator built with Rust.
 ## Requirements
 
 - Rust 1.75+
-- macOS (Linux/Windows support planned)
+- macOS, Windows, or Linux
 
 ## Building
 
@@ -24,6 +24,12 @@ cargo build
 
 # Release build
 cargo build --release
+
+# macOS: Create .app bundle and DMG
+./scripts/build-dmg.sh
+
+# Windows: Create release package (PowerShell)
+.\scripts\build-windows.ps1
 ```
 
 ## Running
@@ -61,23 +67,22 @@ This installs a pre-commit hook that runs:
 
 ## Keybindings
 
-| Action | Shortcut |
-|--------|----------|
-| New tab | `Cmd+T` |
-| Close tab | `Cmd+W` |
-| Next tab | `Cmd+Shift+]` |
-| Previous tab | `Cmd+Shift+[` |
-| Split vertical | `Cmd+Shift+D` |
-| Split horizontal | `Cmd+D` |
-| Settings | `Cmd+,` |
-| Quit | `Cmd+Q` |
+| Action | macOS | Windows/Linux |
+|--------|-------|---------------|
+| New tab | `Cmd+T` | `Ctrl+T` |
+| Close tab | `Cmd+W` | `Ctrl+W` |
+| Next tab | `Cmd+Shift+]` | `Ctrl+Shift+]` |
+| Previous tab | `Cmd+Shift+[` | `Ctrl+Shift+[` |
+| Split vertical | `Cmd+Shift+D` | `Ctrl+Shift+D` |
+| Split horizontal | `Cmd+D` | `Ctrl+D` |
+| Settings | `Cmd+,` | `Ctrl+,` |
+| Quit | `Cmd+Q` | `Ctrl+Q` |
 
 ## Roadmap
 
 Planned features for future releases:
 
 - **SSH Support** - Remote terminal sessions via SSH
-- **Linux/Windows** - Cross-platform support
 - **Profiles** - Save and switch between connection profiles
 - **Serial/Telnet** - Additional connection protocols
 

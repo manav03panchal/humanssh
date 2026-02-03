@@ -11,8 +11,6 @@
 //! - Async helpers for PTY operations
 //! - Helper macros for common test patterns
 
-#![cfg(test)]
-
 use crate::terminal::types::{DisplayState, TermSize};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};

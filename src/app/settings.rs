@@ -129,14 +129,6 @@ mod tests {
         use super::TERMINAL_FONTS;
 
         #[test]
-        fn test_terminal_fonts_not_empty() {
-            assert!(
-                !TERMINAL_FONTS.is_empty(),
-                "TERMINAL_FONTS list should not be empty"
-            );
-        }
-
-        #[test]
         fn test_terminal_fonts_has_reasonable_count() {
             // Should have at least a few font options
             assert!(

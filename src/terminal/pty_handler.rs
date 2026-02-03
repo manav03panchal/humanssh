@@ -9,8 +9,9 @@ use std::sync::mpsc::{self, Receiver, SyncSender, TrySendError};
 use std::sync::Arc;
 use std::thread;
 
-/// Allowed shells for security validation.
+/// Allowed shells for security validation (Unix).
 /// Only absolute paths to known shells are permitted.
+#[cfg(not(target_os = "windows"))]
 const ALLOWED_SHELLS: &[&str] = &[
     // Standard locations
     "/bin/sh",
@@ -40,11 +41,26 @@ const ALLOWED_SHELLS: &[&str] = &[
     "/run/current-system/sw/bin/fish",
 ];
 
-/// Default shell to use when SHELL is invalid or unset.
+/// Allowed shell executables for security validation (Windows).
+/// These are executable names that will be resolved via PATH or System32.
+#[cfg(target_os = "windows")]
+const ALLOWED_SHELLS_WINDOWS: &[&str] = &[
+    "cmd.exe",
+    "powershell.exe",
+    "pwsh.exe", // PowerShell Core
+];
+
+/// Default shell to use when SHELL is invalid or unset (Unix).
+#[cfg(not(target_os = "windows"))]
 const DEFAULT_SHELL: &str = "/bin/zsh";
 
-/// Get a validated shell path from the environment.
+/// Default shell to use when COMSPEC is invalid or unset (Windows).
+#[cfg(target_os = "windows")]
+const DEFAULT_SHELL_WINDOWS: &str = "powershell.exe";
+
+/// Get a validated shell path from the environment (Unix).
 /// Falls back to DEFAULT_SHELL if SHELL is unset, invalid, or not in the allowlist.
+#[cfg(not(target_os = "windows"))]
 fn get_validated_shell() -> String {
     let shell = match std::env::var("SHELL") {
         Ok(s) => s,
@@ -101,6 +117,70 @@ fn get_validated_shell() -> String {
         DEFAULT_SHELL
     );
     DEFAULT_SHELL.to_string()
+}
+
+/// Get a validated shell path from the environment (Windows).
+/// Uses COMSPEC or falls back to PowerShell.
+#[cfg(target_os = "windows")]
+fn get_validated_shell() -> String {
+    // Try COMSPEC first (typically cmd.exe)
+    if let Ok(comspec) = std::env::var("COMSPEC") {
+        let shell_name = Path::new(&comspec)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if ALLOWED_SHELLS_WINDOWS
+            .iter()
+            .any(|&allowed| shell_name == allowed.to_lowercase())
+            && Path::new(&comspec).exists()
+        {
+            tracing::debug!("Using COMSPEC shell: {}", comspec);
+            return comspec;
+        }
+    }
+
+    // Try to find PowerShell (preferred default on Windows)
+    if let Ok(system_root) = std::env::var("SystemRoot") {
+        // Try PowerShell Core (pwsh) first via PATH
+        if let Ok(output) = std::process::Command::new("where").arg("pwsh.exe").output() {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout);
+                if let Some(first_line) = path.lines().next() {
+                    let pwsh_path = first_line.trim();
+                    if Path::new(pwsh_path).exists() {
+                        tracing::debug!("Using PowerShell Core: {}", pwsh_path);
+                        return pwsh_path.to_string();
+                    }
+                }
+            }
+        }
+
+        // Fall back to Windows PowerShell
+        let powershell_path = format!(
+            "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            system_root
+        );
+        if Path::new(&powershell_path).exists() {
+            tracing::debug!("Using Windows PowerShell: {}", powershell_path);
+            return powershell_path;
+        }
+
+        // Last resort: cmd.exe
+        let cmd_path = format!("{}\\System32\\cmd.exe", system_root);
+        if Path::new(&cmd_path).exists() {
+            tracing::debug!("Using cmd.exe: {}", cmd_path);
+            return cmd_path;
+        }
+    }
+
+    // Absolute fallback
+    tracing::warn!(
+        "Could not find any shell, using default: {}",
+        DEFAULT_SHELL_WINDOWS
+    );
+    DEFAULT_SHELL_WINDOWS.to_string()
 }
 
 /// Cached process state to avoid blocking UI thread.
@@ -181,10 +261,16 @@ impl PtyHandler {
         // Get and validate the user's shell (security: prevents command injection)
         let shell = get_validated_shell();
 
-        // Start shell as login shell (-l) so it sources user's profile (.zprofile, .bash_profile)
-        // This ensures PATH and other env vars are properly set when launched from .app bundle
         let mut cmd = CommandBuilder::new(&shell);
-        cmd.arg("-l");
+
+        // Platform-specific shell configuration
+        #[cfg(not(target_os = "windows"))]
+        {
+            // Start shell as login shell (-l) so it sources user's profile (.zprofile, .bash_profile)
+            // This ensures PATH and other env vars are properly set when launched from .app bundle
+            cmd.arg("-l");
+        }
+
         cmd.env("TERM", "xterm-256color");
 
         // Set working directory if provided
@@ -194,19 +280,35 @@ impl PtyHandler {
             }
         }
 
-        // Ensure common paths are in PATH for macOS app bundles (which have minimal env)
-        if let Ok(current_path) = std::env::var("PATH") {
-            let homebrew_paths = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin";
-            if !current_path.contains("/opt/homebrew") {
-                cmd.env("PATH", format!("{}:{}", homebrew_paths, current_path));
+        // Platform-specific PATH handling
+        #[cfg(target_os = "macos")]
+        {
+            // Ensure common paths are in PATH for macOS app bundles (which have minimal env)
+            if let Ok(current_path) = std::env::var("PATH") {
+                let homebrew_paths = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin";
+                if !current_path.contains("/opt/homebrew") {
+                    cmd.env("PATH", format!("{}:{}", homebrew_paths, current_path));
+                }
+            } else {
+                // Fallback PATH if none set
+                cmd.env(
+                    "PATH",
+                    "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+                );
             }
-        } else {
-            // Fallback PATH if none set
-            cmd.env(
-                "PATH",
-                "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
-            );
         }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Linux typically has proper PATH set, but ensure common locations
+            if let Ok(current_path) = std::env::var("PATH") {
+                if !current_path.contains("/usr/local/bin") {
+                    cmd.env("PATH", format!("/usr/local/bin:{}", current_path));
+                }
+            }
+        }
+
+        // Windows: PATH is typically already correctly set, no modifications needed
 
         // Spawn the shell process
         let child = pair
@@ -507,7 +609,36 @@ impl PtyHandler {
             }
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            // Use wmic to find child processes
+            let output = std::process::Command::new("wmic")
+                .args([
+                    "process",
+                    "where",
+                    &format!("ParentProcessId={}", shell_pid),
+                    "get",
+                    "ProcessId",
+                    "/format:list",
+                ])
+                .output()
+                .ok()?;
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Parse output like "ProcessId=1234"
+                for line in stdout.lines() {
+                    if let Some(pid_str) = line.strip_prefix("ProcessId=") {
+                        if let Ok(pid) = pid_str.trim().parse() {
+                            return Some(pid);
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             None
         }
@@ -545,7 +676,38 @@ impl PtyHandler {
             std::fs::read_link(&cwd_path).ok()
         }
 
-        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "windows")]
+        {
+            // On Windows, getting CWD of another process requires NtQueryInformationProcess
+            // which is complex. For now, we'll try to use PowerShell as a workaround.
+            // Note: This only works for processes we have access to.
+            let output = std::process::Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    &format!(
+                        "(Get-Process -Id {} -ErrorAction SilentlyContinue).Path | Split-Path -Parent",
+                        pid
+                    ),
+                ])
+                .output()
+                .ok()?;
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let path_str = stdout.trim();
+                if !path_str.is_empty() {
+                    let path = std::path::PathBuf::from(path_str);
+                    if path.is_dir() {
+                        return Some(path);
+                    }
+                }
+            }
+            // Fall back to user's home directory on Windows
+            dirs::home_dir()
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             None
         }
@@ -580,7 +742,7 @@ impl PtyHandler {
             return (false, None);
         };
 
-        // Try /proc first (Linux)
+        // Linux: read /proc
         #[cfg(target_os = "linux")]
         {
             if let Ok(entries) = std::fs::read_dir("/proc") {
@@ -617,8 +779,8 @@ impl PtyHandler {
             return (false, None);
         }
 
-        // macOS/BSD fallback using pgrep
-        #[cfg(not(target_os = "linux"))]
+        // macOS/BSD: use pgrep
+        #[cfg(target_os = "macos")]
         {
             let output = match std::process::Command::new("pgrep")
                 .args(["-P", &pid.to_string()])
@@ -649,6 +811,53 @@ impl PtyHandler {
 
             (true, process_name)
         }
+
+        // Windows: use wmic
+        #[cfg(target_os = "windows")]
+        {
+            let output = match std::process::Command::new("wmic")
+                .args([
+                    "process",
+                    "where",
+                    &format!("ParentProcessId={}", pid),
+                    "get",
+                    "Name,ProcessId",
+                    "/format:list",
+                ])
+                .output()
+            {
+                Ok(o) => o,
+                Err(_) => return (false, None),
+            };
+
+            if !output.status.success() {
+                return (false, None);
+            }
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut has_children = false;
+            let mut process_name = None;
+
+            // Parse output like "Name=powershell.exe\nProcessId=1234"
+            for line in stdout.lines() {
+                if let Some(name) = line.strip_prefix("Name=") {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        has_children = true;
+                        process_name = Some(name.to_string());
+                        break;
+                    }
+                }
+            }
+
+            (has_children, process_name)
+        }
+
+        // Other platforms: no detection
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        {
+            (false, None)
+        }
     }
 }
 
@@ -677,6 +886,15 @@ impl Drop for PtyHandler {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(
+    clippy::const_is_empty,
+    clippy::unnecessary_literal_unwrap,
+    clippy::bind_instead_of_map,
+    clippy::assertions_on_constants,
+    clippy::while_let_loop,
+    clippy::field_reassign_with_default,
+    clippy::single_match
+)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;

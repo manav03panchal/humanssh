@@ -134,6 +134,7 @@ pub fn terminal_colors(cx: &App) -> TerminalColors {
 }
 
 #[cfg(test)]
+#[allow(clippy::clone_on_copy)]
 mod tests {
     use super::{rgb, Hsla, TerminalColors, TERMINAL_COLORS_CACHE};
 

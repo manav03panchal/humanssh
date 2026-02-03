@@ -2025,6 +2025,14 @@ impl Focusable for TerminalPane {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::assertions_on_constants,
+    clippy::const_is_empty,
+    clippy::absurd_extreme_comparisons,
+    clippy::unnecessary_cast,
+    clippy::unnecessary_literal_unwrap,
+    clippy::bind_instead_of_map
+)]
 mod tests {
     use super::*;
     use alacritty_terminal::grid::Dimensions;
@@ -2312,7 +2320,7 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_font_size_within_range() {
         let font_size = 16.0_f32;
-        let clamped = font_size.max(MIN_FONT_SIZE).min(MAX_FONT_SIZE);
+        let clamped = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
         assert_eq!(clamped, font_size);
     }
 
