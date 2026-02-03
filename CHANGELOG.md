@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- PWD inheritance: new tabs and splits inherit working directory from active pane
+- Unfocused pane dimming (Ghostty-style 35% overlay) for visual focus indication
 - Pane abstraction (`PaneKind` enum) for extensible pane types (terminal, SSH, etc.)
 - Terminal types module (`src/terminal/types.rs`) for testable data structures
 - Terminal colors module (`src/terminal/colors.rs`) for color conversion utilities
@@ -41,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Consolidated display state into RwLock (size, cell_dims, bounds, font_size)
 - Adaptive PTY polling (8ms active, 100ms idle) reduces CPU usage when terminal is idle
 - Row-batched text shaping reduces allocations from O(cells) to O(rows)
-- Bounded PTY output queue (256 messages max) prevents memory exhaustion
+- Bounded PTY output queue (1024 messages max) prevents memory exhaustion
+- Increased PTY read buffer from 4KB to 32KB for better throughput
 - Cached process detection (500ms TTL) avoids UI thread blocking
 - Validated SHELL environment variable against allowlist (security)
 
@@ -52,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Tab title cache to reduce per-frame recomputation
 
 ### Removed
+- Focused pane border styling (replaced with unfocused pane dimming)
 - Commented SSH dependencies from Cargo.toml (will be re-added when implemented)
 
 ## [0.1.0] - 2026-01-30
