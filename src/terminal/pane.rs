@@ -338,6 +338,15 @@ impl TerminalPane {
         }
     }
 
+    /// Get the name of the shell being used (e.g., "zsh", "bash").
+    pub fn shell_name(&self) -> Option<String> {
+        std::env::var("SHELL").ok().and_then(|s| {
+            std::path::Path::new(&s)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+        })
+    }
+
     /// Get the terminal title (set by OSC escape sequences)
     pub fn title(&self) -> Option<SharedString> {
         self.listener

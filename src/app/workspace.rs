@@ -2,6 +2,7 @@
 
 use super::pane::PaneKind;
 use super::pane_group::{PaneNode, SplitDirection};
+use super::status_bar::{render_status_bar, stats_collector, SystemStats};
 use crate::actions::{CloseTab, OpenSettings, Quit};
 use crate::config::timing;
 #[cfg(not(test))]
@@ -68,6 +69,8 @@ pub struct Workspace {
     last_title_update: std::time::Instant,
     /// Last saved window bounds (for change detection)
     last_saved_bounds: Option<(f32, f32, f32, f32)>,
+    /// Cached system stats for status bar
+    cached_stats: SystemStats,
 }
 
 impl Workspace {
@@ -101,6 +104,7 @@ impl Workspace {
             cached_titles: vec!["Terminal 1".into()],
             last_title_update: std::time::Instant::now(),
             last_saved_bounds: None,
+            cached_stats: SystemStats::default(),
         }
     }
 
@@ -505,6 +509,22 @@ impl Render for Workspace {
             }
         }
 
+        // Refresh system stats for status bar
+        {
+            let collector_arc = stats_collector();
+            let mut collector = collector_arc.write();
+            self.cached_stats = collector.refresh();
+
+            // Get terminal-specific info from active pane
+            if let Some(tab) = self.tabs.get(self.active_tab) {
+                if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                    let (shell, cwd, process) = pane.get_terminal_info(cx);
+                    collector.set_terminal_info(shell, cwd, process);
+                    self.cached_stats = collector.current();
+                }
+            }
+        }
+
         // Get theme colors
         let colors = terminal_colors(cx);
         let title_bar_bg = colors.title_bar;
@@ -681,6 +701,8 @@ impl Render for Workspace {
                         super::pane_group_view::render_pane_tree(&tab.panes, tab.active_pane, window, cx)
                     }))
             )
+            // Status bar
+            .child(render_status_bar(&self.cached_stats, cx))
             // Confirmation dialog overlay
             .when(self.pending_action.is_some(), |d| {
                 let action_text = match self.pending_action {
