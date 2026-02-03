@@ -1847,7 +1847,7 @@ mod tests {
         // Final verification
         cx.read(|app| {
             let ws = workspace.read(app);
-            assert!(ws.tabs.len() >= 1, "Should have at least one tab");
+            assert!(!ws.tabs.is_empty(), "Should have at least one tab");
             assert!(ws.active_tab < ws.tabs.len(), "Active tab should be valid");
         });
     }
@@ -1950,7 +1950,7 @@ mod tests {
         for i in 0..ITERATIONS {
             workspace.update(cx, |ws, cx| {
                 match i % 10 {
-                    0 | 1 | 2 => ws.new_tab(cx),
+                    0..=2 => ws.new_tab(cx),
                     3 | 4 => {
                         if ws.tabs.len() > 1 {
                             ws.close_tab(ws.tabs.len() - 1, cx);
@@ -1986,7 +1986,7 @@ mod tests {
         // Final verification
         cx.read(|app| {
             let ws = workspace.read(app);
-            assert!(ws.tabs.len() >= 1, "Should have at least one tab");
+            assert!(!ws.tabs.is_empty(), "Should have at least one tab");
             for tab in &ws.tabs {
                 assert!(
                     tab.panes.find_pane(tab.active_pane).is_some(),
@@ -2011,7 +2011,7 @@ mod tests {
         cx.read(|app| {
             let ws = workspace.read(app);
             assert!(
-                ws.tabs.len() >= 1,
+                !ws.tabs.is_empty(),
                 "Workspace must always have at least 1 tab"
             );
             assert_eq!(ws.tabs.len(), 1, "New workspace starts with exactly 1 tab");
@@ -2254,11 +2254,6 @@ mod tests {
                 assert!(
                     !tab.fallback_title.is_empty(),
                     "Tab {} fallback_title should not be empty",
-                    i
-                );
-                assert!(
-                    tab.fallback_title.len() > 0,
-                    "Tab {} fallback_title.len() > 0",
                     i
                 );
             }

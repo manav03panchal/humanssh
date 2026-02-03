@@ -236,7 +236,7 @@ fn bench_term_size(c: &mut Criterion) {
     let mut group = c.benchmark_group("term_size");
 
     // Default construction
-    group.bench_function("default", |b| b.iter(|| TermSize::default()));
+    group.bench_function("default", |b| b.iter(TermSize::default));
 
     // Custom construction
     group.bench_function("custom", |b| {
@@ -279,9 +279,9 @@ fn bench_mouse_esc_buf(c: &mut Criterion) {
     let mut group = c.benchmark_group("mouse_esc_buf");
 
     // Construction
-    group.bench_function("new", |b| b.iter(|| MouseEscBuf::new()));
+    group.bench_function("new", |b| b.iter(MouseEscBuf::new));
 
-    group.bench_function("default", |b| b.iter(|| MouseEscBuf::default()));
+    group.bench_function("default", |b| b.iter(MouseEscBuf::default));
 
     // SGR mouse sequence writing (common mouse click)
     group.bench_function("write_sgr_click", |b| {
@@ -406,11 +406,11 @@ fn bench_batch_color_operations(c: &mut Criterion) {
 fn bench_terminal_colors(c: &mut Criterion) {
     let mut group = c.benchmark_group("terminal_colors");
 
-    group.bench_function("default", |b| b.iter(|| TerminalColors::default()));
+    group.bench_function("default", |b| b.iter(TerminalColors::default));
 
-    // Clone operation (common when passing colors around)
+    // Copy operation (common when passing colors around)
     let colors = TerminalColors::default();
-    group.bench_function("clone", |b| b.iter(|| black_box(&colors).clone()));
+    group.bench_function("copy_via_deref", |b| b.iter(|| *black_box(&colors)));
 
     // Copy operation
     group.bench_function("copy", |b| {

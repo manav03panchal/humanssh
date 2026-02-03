@@ -149,6 +149,11 @@ impl FmtWrite for MouseEscBuf {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::clone_on_copy,
+    clippy::absurd_extreme_comparisons,
+    clippy::unnecessary_literal_unwrap
+)]
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;

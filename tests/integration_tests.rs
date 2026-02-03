@@ -766,8 +766,8 @@ mod edge_cases {
 
         // Should end up at last resize values
         let (cols, rows) = session.size;
-        assert!(cols >= 40 && cols < 200);
-        assert!(rows >= 12 && rows < 60);
+        assert!((40..200).contains(&cols));
+        assert!((12..60).contains(&rows));
     }
 
     #[test]

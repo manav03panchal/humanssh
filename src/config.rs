@@ -100,6 +100,9 @@ pub mod settings {
 }
 
 #[cfg(test)]
+// Allow assertions on constants - these tests verify const relationships
+// serve as documentation that config values are sensible
+#[allow(clippy::assertions_on_constants, clippy::const_is_empty)]
 mod tests {
     use super::*;
 
@@ -625,11 +628,11 @@ mod tests {
                 let typical_width = 1920.0;
                 let typical_height = 1080.0;
                 assert!(
-                    window::MIN_SIZE <= typical_width && typical_width <= window::MAX_SIZE,
+                    (window::MIN_SIZE..=window::MAX_SIZE).contains(&typical_width),
                     "Typical width 1920 should be valid"
                 );
                 assert!(
-                    window::MIN_SIZE <= typical_height && typical_height <= window::MAX_SIZE,
+                    (window::MIN_SIZE..=window::MAX_SIZE).contains(&typical_height),
                     "Typical height 1080 should be valid"
                 );
             }
