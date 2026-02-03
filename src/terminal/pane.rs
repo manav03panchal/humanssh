@@ -20,6 +20,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use base64::Engine;
 use gpui::*;
+use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
 
 // Terminal-specific actions to capture keys before GPUI's focus system
 actions!(terminal, [SendTab, SendShiftTab]);
@@ -624,224 +625,216 @@ impl TerminalPane {
         }
     }
 
-    /// Handle a key event
+    /// Convert GPUI modifiers to termwiz Modifiers
+    fn gpui_mods_to_termwiz(mods: &gpui::Modifiers) -> TermwizMods {
+        let mut tm = TermwizMods::NONE;
+        if mods.shift {
+            tm |= TermwizMods::SHIFT;
+        }
+        if mods.alt {
+            tm |= TermwizMods::ALT;
+        }
+        if mods.control {
+            tm |= TermwizMods::CTRL;
+        }
+        tm
+    }
+
+    /// Convert GPUI key string to termwiz KeyCode
+    fn gpui_key_to_termwiz(key: &str) -> Option<KeyCode> {
+        match key {
+            // Arrow keys
+            "up" => Some(KeyCode::UpArrow),
+            "down" => Some(KeyCode::DownArrow),
+            "left" => Some(KeyCode::LeftArrow),
+            "right" => Some(KeyCode::RightArrow),
+
+            // Navigation
+            "home" => Some(KeyCode::Home),
+            "end" => Some(KeyCode::End),
+            "pageup" => Some(KeyCode::PageUp),
+            "pagedown" => Some(KeyCode::PageDown),
+            "insert" => Some(KeyCode::Insert),
+            "delete" => Some(KeyCode::Delete),
+
+            // Special keys
+            "tab" => Some(KeyCode::Tab),
+            "enter" => Some(KeyCode::Enter),
+            "escape" => Some(KeyCode::Escape),
+            "backspace" => Some(KeyCode::Backspace),
+            "space" => Some(KeyCode::Char(' ')),
+
+            // Function keys
+            "f1" => Some(KeyCode::Function(1)),
+            "f2" => Some(KeyCode::Function(2)),
+            "f3" => Some(KeyCode::Function(3)),
+            "f4" => Some(KeyCode::Function(4)),
+            "f5" => Some(KeyCode::Function(5)),
+            "f6" => Some(KeyCode::Function(6)),
+            "f7" => Some(KeyCode::Function(7)),
+            "f8" => Some(KeyCode::Function(8)),
+            "f9" => Some(KeyCode::Function(9)),
+            "f10" => Some(KeyCode::Function(10)),
+            "f11" => Some(KeyCode::Function(11)),
+            "f12" => Some(KeyCode::Function(12)),
+
+            // Single character
+            k if k.len() == 1 => k.chars().next().map(KeyCode::Char),
+
+            _ => None,
+        }
+    }
+
+    /// Handle a key event using termwiz for escape sequence encoding
     fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
         let mode = {
             let term = self.term.lock();
             *term.mode()
         };
 
-        // Handle Cmd+Shift shortcuts (must check before Cmd alone)
-        if event.keystroke.modifiers.platform && event.keystroke.modifiers.shift {
-            match event.keystroke.key.as_str() {
-                "left" => {
-                    // Cmd+Shift+Left: Select to start of line
-                    self.handle_cmd_shift_arrow("left", cx);
-                    return;
-                }
-                "right" => {
-                    // Cmd+Shift+Right: Select to end of line
-                    self.handle_cmd_shift_arrow("right", cx);
-                    return;
-                }
-                _ => {}
-            }
-        }
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
 
-        // Handle Cmd+key shortcuts
-        if event.keystroke.modifiers.platform && !event.keystroke.modifiers.shift {
-            match event.keystroke.key.as_str() {
-                "a" => {
-                    // Select all terminal content
-                    self.select_all();
-                    cx.notify();
-                    return;
-                }
-                "c" => {
-                    // Copy selection
-                    self.copy_selection(cx);
-                    return;
-                }
-                "v" => {
-                    // Paste from clipboard
-                    self.paste_clipboard(cx);
-                    return;
-                }
-                "k" => {
-                    // Clear scrollback and screen
-                    self.send_input("\x0c"); // Ctrl+L to clear screen
-                    return;
-                }
-                "backspace" => {
-                    // Delete line (cursor to beginning) - Ctrl+U
-                    self.send_input("\x15");
-                    return;
-                }
-                "left" => {
-                    // Cmd+Left: Go to start of line - Ctrl+A
-                    self.send_input("\x01");
-                    return;
-                }
-                "right" => {
-                    // Cmd+Right: Go to end of line - Ctrl+E
-                    self.send_input("\x05");
-                    return;
-                }
-                "up" => {
-                    // Cmd+Up: Scroll to top of scrollback
-                    self.term.lock().scroll_display(Scroll::Top);
-                    cx.notify();
-                    return;
-                }
-                "down" => {
-                    // Cmd+Down: Scroll to bottom
-                    self.term.lock().scroll_display(Scroll::Bottom);
-                    cx.notify();
-                    return;
-                }
-                "=" | "+" => {
-                    // Zoom in (increase font size)
-                    let mut display = self.display.write();
-                    display.font_size = (display.font_size + 1.0).min(MAX_FONT_SIZE);
-                    cx.notify();
-                    return;
-                }
-                "-" => {
-                    // Zoom out (decrease font size)
-                    let mut display = self.display.write();
-                    display.font_size = (display.font_size - 1.0).max(MIN_FONT_SIZE);
-                    cx.notify();
-                    return;
-                }
-                "0" => {
-                    // Reset to default font size
-                    self.display.write().font_size = DEFAULT_FONT_SIZE;
-                    cx.notify();
-                    return;
-                }
-                _ => return, // Let other Cmd shortcuts pass through
-            }
-        }
-
-        // Handle Option+Backspace for word deletion
-        if event.keystroke.modifiers.alt && event.keystroke.key == "backspace" {
-            // Send ESC + DEL for word deletion (works in most shells)
-            self.send_input("\x1b\x7f");
-            return;
-        }
-
-        // Handle Option+Shift+Arrow for word-level selection (must check before Option alone)
-        if event.keystroke.modifiers.alt && event.keystroke.modifiers.shift {
-            match event.keystroke.key.as_str() {
-                "left" | "right" => {
-                    self.handle_option_shift_arrow(event.keystroke.key.as_str(), cx);
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // Handle Option+Left/Right for word movement (without shift)
-        if event.keystroke.modifiers.alt && !event.keystroke.modifiers.shift {
-            match event.keystroke.key.as_str() {
-                "left" => {
-                    // ESC + b = backward word (works in bash/zsh with default bindings)
-                    self.send_input("\x1bb");
-                    return;
-                }
-                "right" => {
-                    // ESC + f = forward word (works in bash/zsh with default bindings)
-                    self.send_input("\x1bf");
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        // Handle Shift+Arrow for text selection (character level)
-        if event.keystroke.modifiers.shift && !event.keystroke.modifiers.alt {
-            match event.keystroke.key.as_str() {
-                "left" | "right" | "up" | "down" => {
-                    self.handle_shift_arrow(event.keystroke.key.as_str(), cx);
-                    return;
-                }
-                _ => {}
-            }
-        }
-
-        let input = match &event.keystroke.key {
-            key if key.len() == 1 => {
-                // Clear selection on typing
-                self.term.lock().selection = None;
-
-                let c = key.chars().next().unwrap();
-
-                if event.keystroke.modifiers.control {
-                    if c.is_ascii_alphabetic() {
-                        let ctrl_char = (c.to_ascii_lowercase() as u8 - b'a' + 1) as char;
-                        ctrl_char.to_string()
-                    } else {
-                        key.clone()
-                    }
-                } else if event.keystroke.modifiers.shift && c.is_ascii_alphabetic() {
-                    // Handle shift for uppercase letters
-                    c.to_ascii_uppercase().to_string()
-                } else {
-                    key.clone()
-                }
-            }
-            key => {
-                let app_cursor = mode.contains(TermMode::APP_CURSOR);
-                match key.as_str() {
-                    "enter" => "\r".to_string(),
-                    "backspace" => "\x7f".to_string(),
-                    "tab" => "\t".to_string(),
-                    "escape" => {
-                        // Clear selection on escape
-                        self.term.lock().selection = None;
-                        cx.notify();
-                        "\x1b".to_string()
-                    }
-                    "up" => {
-                        if app_cursor {
-                            "\x1bOA".to_string()
-                        } else {
-                            "\x1b[A".to_string()
-                        }
-                    }
-                    "down" => {
-                        if app_cursor {
-                            "\x1bOB".to_string()
-                        } else {
-                            "\x1b[B".to_string()
-                        }
+        // === Platform (Cmd/Super) shortcuts - handled by the app, not sent to PTY ===
+        if mods.platform {
+            if mods.shift {
+                match key {
+                    "left" => {
+                        self.handle_cmd_shift_arrow("left", cx);
+                        return;
                     }
                     "right" => {
-                        if app_cursor {
-                            "\x1bOC".to_string()
-                        } else {
-                            "\x1b[C".to_string()
-                        }
+                        self.handle_cmd_shift_arrow("right", cx);
+                        return;
+                    }
+                    _ => return,
+                }
+            } else {
+                match key {
+                    "a" => {
+                        self.select_all();
+                        cx.notify();
+                        return;
+                    }
+                    "c" => {
+                        self.copy_selection(cx);
+                        return;
+                    }
+                    "v" => {
+                        self.paste_clipboard(cx);
+                        return;
+                    }
+                    "k" => {
+                        self.send_input("\x0c");
+                        return;
+                    }
+                    "backspace" => {
+                        self.send_input("\x15");
+                        return;
                     }
                     "left" => {
-                        if app_cursor {
-                            "\x1bOD".to_string()
-                        } else {
-                            "\x1b[D".to_string()
-                        }
+                        self.send_input("\x01");
+                        return;
                     }
-                    "home" => "\x1b[H".to_string(),
-                    "end" => "\x1b[F".to_string(),
-                    "pageup" => "\x1b[5~".to_string(),
-                    "pagedown" => "\x1b[6~".to_string(),
-                    "delete" => "\x1b[3~".to_string(),
-                    "space" => " ".to_string(),
+                    "right" => {
+                        self.send_input("\x05");
+                        return;
+                    }
+                    "up" => {
+                        self.term.lock().scroll_display(Scroll::Top);
+                        cx.notify();
+                        return;
+                    }
+                    "down" => {
+                        self.term.lock().scroll_display(Scroll::Bottom);
+                        cx.notify();
+                        return;
+                    }
+                    "=" | "+" => {
+                        let mut display = self.display.write();
+                        display.font_size = (display.font_size + 1.0).min(MAX_FONT_SIZE);
+                        cx.notify();
+                        return;
+                    }
+                    "-" => {
+                        let mut display = self.display.write();
+                        display.font_size = (display.font_size - 1.0).max(MIN_FONT_SIZE);
+                        cx.notify();
+                        return;
+                    }
+                    "0" => {
+                        self.display.write().font_size = DEFAULT_FONT_SIZE;
+                        cx.notify();
+                        return;
+                    }
                     _ => return,
                 }
             }
+        }
+
+        // === Selection shortcuts (handled by terminal UI, not sent to PTY) ===
+        if mods.alt && mods.shift && !mods.control {
+            match key {
+                "left" | "right" => {
+                    self.handle_option_shift_arrow(key, cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        if mods.shift && !mods.alt && !mods.control {
+            match key {
+                "left" | "right" | "up" | "down" => {
+                    self.handle_shift_arrow(key, cx);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Clear selection on typing (except for modifier-only keys)
+        if !key.is_empty() && key != "shift" && key != "control" && key != "alt" {
+            self.term.lock().selection = None;
+        }
+
+        // === Use termwiz to encode escape sequences ===
+        let app_cursor = mode.contains(TermMode::APP_CURSOR);
+
+        // Build termwiz encoding modes
+        let encode_modes = KeyCodeEncodeModes {
+            encoding: KeyboardEncoding::Xterm,
+            application_cursor_keys: app_cursor,
+            newline_mode: false,
+            modify_other_keys: None,
         };
 
-        self.send_input(&input);
+        // Convert GPUI key to termwiz KeyCode
+        if let Some(keycode) = Self::gpui_key_to_termwiz(key) {
+            let termwiz_mods = Self::gpui_mods_to_termwiz(mods);
+
+            // Special case: Alt+Arrow for word movement in shells
+            if mods.alt && !mods.control && !mods.shift {
+                match key {
+                    "left" => {
+                        self.send_input("\x1bb"); // backward-word
+                        return;
+                    }
+                    "right" => {
+                        self.send_input("\x1bf"); // forward-word
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Use termwiz to encode the key
+            if let Ok(seq) = keycode.encode(termwiz_mods, encode_modes, true) {
+                if !seq.is_empty() {
+                    self.send_input(&seq);
+                }
+            }
+        }
     }
 
     /// Get selected text from terminal using alacritty's selection
