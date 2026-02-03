@@ -12,9 +12,10 @@ use uuid::Uuid;
 /// Render a pane tree as a GPUI element.
 ///
 /// Recursively builds nested flex containers for splits and terminal views for leaves.
+/// Unfocused panes are dimmed with a subtle overlay for visual distinction.
 pub fn render_pane_tree(
     node: &PaneNode,
-    _active_pane: Uuid,
+    active_pane: Uuid,
     _window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) -> AnyElement {
@@ -25,16 +26,31 @@ pub fn render_pane_tree(
     match node {
         PaneNode::Leaf { id, pane } => {
             let pane_id = *id;
+            let is_active = *id == active_pane;
 
-            div()
+            let mut container = div()
                 .id(ElementId::Name(format!("pane-{}", id).into()))
                 .size_full()
+                .relative()
                 .bg(colors.background)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.set_active_pane(pane_id, cx);
                 }))
-                .child(pane.render(_window))
-                .into_any_element()
+                .child(pane.render(_window));
+
+            // Dim overlay for unfocused panes (like Ghostty)
+            if !is_active {
+                container = container.child(
+                    div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .bg(hsla(0.0, 0.0, 0.0, 0.35)),
+                );
+            }
+
+            container.into_any_element()
         }
         PaneNode::Split {
             direction,
@@ -44,8 +60,8 @@ pub fn render_pane_tree(
         } => {
             let ratio = *ratio;
 
-            let first_elem = render_pane_tree(first, _active_pane, _window, cx);
-            let second_elem = render_pane_tree(second, _active_pane, _window, cx);
+            let first_elem = render_pane_tree(first, active_pane, _window, cx);
+            let second_elem = render_pane_tree(second, active_pane, _window, cx);
 
             match direction {
                 SplitDirection::Horizontal => div()

@@ -233,8 +233,18 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Get the current working directory from the active pane of the active tab.
+    fn get_active_pane_cwd(&self, cx: &App) -> Option<std::path::PathBuf> {
+        let tab = self.tabs.get(self.active_tab)?;
+        let pane = tab.panes.find_pane(tab.active_pane)?;
+        pane.get_current_directory(cx)
+    }
+
     fn new_tab(&mut self, cx: &mut Context<Self>) {
-        let terminal = cx.new(TerminalPane::new);
+        // Get working directory from the active pane (if any) for better UX
+        let working_dir = self.get_active_pane_cwd(cx);
+
+        let terminal = cx.new(|cx| TerminalPane::new_in_dir(cx, working_dir));
 
         // Subscribe to terminal exit events for immediate cleanup (non-test only)
         #[cfg(not(test))]
@@ -304,8 +314,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Get working directory from the active pane before creating new terminal
+        let working_dir = self.get_active_pane_cwd(cx);
+
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
-            let new_terminal = cx.new(TerminalPane::new);
+            let new_terminal = cx.new(|cx| TerminalPane::new_in_dir(cx, working_dir));
 
             // Subscribe to terminal exit events for immediate cleanup (non-test only)
             #[cfg(not(test))]

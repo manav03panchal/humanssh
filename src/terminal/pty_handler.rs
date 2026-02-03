@@ -147,6 +147,26 @@ impl PtyHandler {
     /// # Shell Selection
     /// Uses the `SHELL` environment variable. Falls back to `/bin/zsh` if not set.
     pub fn spawn(rows: u16, cols: u16) -> Result<Self> {
+        Self::spawn_in_dir(rows, cols, None)
+    }
+
+    /// Spawn a new PTY with the user's default shell in a specific directory.
+    ///
+    /// # Arguments
+    /// * `rows` - Initial terminal height in rows
+    /// * `cols` - Initial terminal width in columns
+    /// * `working_dir` - Optional working directory for the new shell
+    ///
+    /// # Returns
+    /// A new `PtyHandler` on success, or an error if spawning failed.
+    ///
+    /// # Shell Selection
+    /// Uses the `SHELL` environment variable. Falls back to `/bin/zsh` if not set.
+    pub fn spawn_in_dir(
+        rows: u16,
+        cols: u16,
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
 
         let pair = pty_system
@@ -166,6 +186,13 @@ impl PtyHandler {
         let mut cmd = CommandBuilder::new(&shell);
         cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");
+
+        // Set working directory if provided
+        if let Some(dir) = working_dir {
+            if dir.is_dir() {
+                cmd.cwd(dir);
+            }
+        }
 
         // Ensure common paths are in PATH for macOS app bundles (which have minimal env)
         if let Ok(current_path) = std::env::var("PATH") {
@@ -200,8 +227,8 @@ impl PtyHandler {
             .context("Failed to get PTY reader")?;
 
         // Bounded channel for output bytes (prevents memory exhaustion under heavy output).
-        // 256 messages * ~4KB each = ~1MB max queue size.
-        const PTY_OUTPUT_QUEUE_SIZE: usize = 256;
+        // 1024 messages provides better burst handling while still bounding memory.
+        const PTY_OUTPUT_QUEUE_SIZE: usize = 1024;
         let (output_tx, output_rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) =
             mpsc::sync_channel(PTY_OUTPUT_QUEUE_SIZE);
 
@@ -211,7 +238,8 @@ impl PtyHandler {
 
         // Spawn thread to read PTY output
         let reader_thread = thread::spawn(move || {
-            let mut buf = [0u8; 4096];
+            // 32KB buffer for better throughput during burst output (matches Alacritty/Ghostty)
+            let mut buf = [0u8; 32768];
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
@@ -306,6 +334,105 @@ impl PtyHandler {
             .lock()
             .ok()
             .and_then(|cache| cache.process_name.clone())
+    }
+
+    /// Get the current working directory of the foreground process.
+    ///
+    /// Uses OS-specific methods to determine the CWD:
+    /// - macOS: `lsof -p <pid>` to find the cwd file descriptor
+    /// - Linux: reads `/proc/<pid>/cwd` symlink
+    pub fn get_current_directory(&self) -> Option<std::path::PathBuf> {
+        let pid = self.child.process_id()?;
+        self.get_foreground_process_cwd(pid)
+    }
+
+    /// Get the CWD of the foreground process (or shell if no foreground process).
+    fn get_foreground_process_cwd(&self, shell_pid: u32) -> Option<std::path::PathBuf> {
+        // First try to find a foreground child process
+        let fg_pid = self
+            .get_foreground_child_pid(shell_pid)
+            .unwrap_or(shell_pid);
+        self.get_process_cwd(fg_pid)
+    }
+
+    /// Get the foreground child process of the shell (if any).
+    fn get_foreground_child_pid(&self, shell_pid: u32) -> Option<u32> {
+        #[cfg(target_os = "macos")]
+        {
+            // Use pgrep to find children of the shell
+            let output = std::process::Command::new("pgrep")
+                .args(["-P", &shell_pid.to_string()])
+                .output()
+                .ok()?;
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // Return the last child (most recent foreground process)
+                stdout
+                    .lines()
+                    .last()
+                    .and_then(|pid_str| pid_str.trim().parse().ok())
+            } else {
+                None
+            }
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Read children from /proc
+            let children_path = format!("/proc/{}/task/{}/children", shell_pid, shell_pid);
+            if let Ok(children) = std::fs::read_to_string(&children_path) {
+                children
+                    .split_whitespace()
+                    .last()
+                    .and_then(|pid_str| pid_str.parse().ok())
+            } else {
+                None
+            }
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
+    }
+
+    /// Get the current working directory of a specific process.
+    fn get_process_cwd(&self, pid: u32) -> Option<std::path::PathBuf> {
+        #[cfg(target_os = "macos")]
+        {
+            // Use lsof to get the cwd
+            let output = std::process::Command::new("lsof")
+                .args(["-p", &pid.to_string(), "-Fn", "-a", "-d", "cwd"])
+                .output()
+                .ok()?;
+
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                // lsof output format: p<pid>\nn<path>
+                for line in stdout.lines() {
+                    if let Some(path) = line.strip_prefix('n') {
+                        let path = std::path::PathBuf::from(path);
+                        if path.is_dir() {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+            None
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            // Read /proc/<pid>/cwd symlink
+            let cwd_path = format!("/proc/{}/cwd", pid);
+            std::fs::read_link(&cwd_path).ok()
+        }
+
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        {
+            None
+        }
     }
 
     /// Refresh the process cache if it's stale (older than PROCESS_CACHE_TTL_MS).

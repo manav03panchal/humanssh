@@ -91,6 +91,13 @@ impl PaneKind {
         }
     }
 
+    /// Get the current working directory of the pane's foreground process.
+    pub fn get_current_directory(&self, cx: &App) -> Option<std::path::PathBuf> {
+        match self {
+            PaneKind::Terminal(terminal) => terminal.read(cx).get_current_directory(),
+        }
+    }
+
     /// Check if the pane's underlying process has exited.
     #[cfg_attr(test, allow(dead_code))]
     pub fn has_exited(&self, cx: &App) -> bool {

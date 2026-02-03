@@ -152,6 +152,18 @@ impl TerminalPane {
     /// Spawns a PTY process and starts polling for output. The terminal
     /// starts with default dimensions (80x24) and resizes when rendered.
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::new_in_dir(cx, None)
+    }
+
+    /// Create a new terminal pane with the user's default shell in a specific directory.
+    ///
+    /// # Arguments
+    /// * `cx` - GPUI context
+    /// * `working_dir` - Optional working directory for the new shell
+    ///
+    /// This is used when creating new tabs/splits to inherit the current terminal's
+    /// working directory for better UX.
+    pub fn new_in_dir(cx: &mut Context<Self>, working_dir: Option<std::path::PathBuf>) -> Self {
         // Use reasonable defaults - will be resized when layout occurs
         let display_state = DisplayState::default();
         let size = display_state.size;
@@ -164,13 +176,14 @@ impl TerminalPane {
         let processor = Arc::new(Mutex::new(Processor::new()));
 
         // Spawn PTY
-        let (pty, spawn_error) = match PtyHandler::spawn(size.rows, size.cols) {
-            Ok(pty) => (Some(pty), None),
-            Err(e) => {
-                tracing::error!("Failed to spawn PTY: {}", e);
-                (None, Some(e.to_string()))
-            }
-        };
+        let (pty, spawn_error) =
+            match PtyHandler::spawn_in_dir(size.rows, size.cols, working_dir.as_deref()) {
+                Ok(pty) => (Some(pty), None),
+                Err(e) => {
+                    tracing::error!("Failed to spawn PTY: {}", e);
+                    (None, Some(e.to_string()))
+                }
+            };
 
         // Disable tab stop so Tab key passes through to the terminal instead of
         // being consumed by GPUI's focus navigation system
@@ -313,6 +326,15 @@ impl TerminalPane {
         match &*pty_guard {
             None => None,
             Some(pty) => pty.get_running_process_name(),
+        }
+    }
+
+    /// Get the current working directory of the terminal's foreground process
+    pub fn get_current_directory(&self) -> Option<std::path::PathBuf> {
+        let pty_guard = self.pty.lock();
+        match &*pty_guard {
+            None => None,
+            Some(pty) => pty.get_current_directory(),
         }
     }
 
