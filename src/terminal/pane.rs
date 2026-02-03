@@ -482,16 +482,14 @@ impl TerminalPane {
                 _ => return,
             };
 
-            let mut buf = MouseEscBuf::new();
-            if mode.contains(TermMode::SGR_MOUSE) {
-                let _ = write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1);
-            } else {
-                let cb = (32 + button) as u8;
-                let cx_val = (32 + col + 1).min(255) as u8;
-                let cy = (32 + row + 1).min(255) as u8;
-                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
-            }
-            self.send_input(buf.as_str());
+            let seq = Self::encode_mouse_event(
+                button,
+                col,
+                row,
+                mode.contains(TermMode::SGR_MOUSE),
+                false,
+            );
+            self.send_input(&seq);
         } else if event.button == MouseButton::Left {
             // Start text selection using alacritty's Selection
             let point = TermPoint::new(Line(row as i32), Column(col));
@@ -520,22 +518,20 @@ impl TerminalPane {
                 | TermMode::MOUSE_MODE,
         ) {
             // Send mouse release to PTY
-            let mut buf = MouseEscBuf::new();
-            if mode.contains(TermMode::SGR_MOUSE) {
-                let button = match event.button {
-                    MouseButton::Left => 0,
-                    MouseButton::Middle => 1,
-                    MouseButton::Right => 2,
-                    _ => return,
-                };
-                let _ = write!(buf, "\x1b[<{};{};{}m", button, col + 1, row + 1);
-            } else {
-                let cb = (32 + 3) as u8;
-                let cx_val = (32 + col + 1).min(255) as u8;
-                let cy = (32 + row + 1).min(255) as u8;
-                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx_val as char, cy as char);
-            }
-            self.send_input(buf.as_str());
+            let button = match event.button {
+                MouseButton::Left => 0,
+                MouseButton::Middle => 1,
+                MouseButton::Right => 2,
+                _ => return,
+            };
+            let seq = Self::encode_mouse_event(
+                button,
+                col,
+                row,
+                mode.contains(TermMode::SGR_MOUSE),
+                true,
+            );
+            self.send_input(&seq);
         } else if event.button == MouseButton::Left {
             // End text selection
             if self.dragging {
@@ -587,17 +583,14 @@ impl TerminalPane {
         ) {
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let button = if delta_y < 0.0 { 64 } else { 65 }; // 64 = wheel up, 65 = wheel down
-
-            let mut buf = MouseEscBuf::new();
-            if mode.contains(TermMode::SGR_MOUSE) {
-                let _ = write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1);
-            } else {
-                let cb = (32 + button) as u8;
-                let cx = (32 + col + 1).min(255) as u8;
-                let cy = (32 + row + 1).min(255) as u8;
-                let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx as char, cy as char);
-            }
-            self.send_input(buf.as_str());
+            let seq = Self::encode_mouse_event(
+                button,
+                col,
+                row,
+                mode.contains(TermMode::SGR_MOUSE),
+                false,
+            );
+            self.send_input(&seq);
         } else if mode.contains(TermMode::ALT_SCREEN) {
             // In alternate screen without mouse mode, send arrow keys for scrolling
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
@@ -623,6 +616,36 @@ impl TerminalPane {
                 self.term.lock().scroll_display(scroll);
             }
         }
+    }
+
+    /// Encode a mouse event for the PTY (SGR or legacy X11 format)
+    fn encode_mouse_event(
+        button: u8,
+        col: usize,
+        row: usize,
+        sgr_mode: bool,
+        release: bool,
+    ) -> String {
+        let mut buf = MouseEscBuf::new();
+        if sgr_mode {
+            // SGR 1006 format: ESC [ < button ; col ; row M/m
+            let terminator = if release { 'm' } else { 'M' };
+            let _ = write!(
+                buf,
+                "\x1b[<{};{};{}{}",
+                button,
+                col + 1,
+                row + 1,
+                terminator
+            );
+        } else {
+            // Legacy X11 format: ESC [ M Cb Cx Cy (all +32, max 255)
+            let cb: u8 = if release { 35 } else { 32 + button };
+            let cx = (32 + col + 1).min(255) as u8;
+            let cy = (32 + row + 1).min(255) as u8;
+            let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx as char, cy as char);
+        }
+        buf.as_str().to_string()
     }
 
     /// Convert GPUI modifiers to termwiz Modifiers
