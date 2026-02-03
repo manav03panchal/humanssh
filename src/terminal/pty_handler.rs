@@ -904,14 +904,16 @@ mod tests {
     use test_case::test_case;
 
     // ========================================================================
-    // Shell Validation Tests
+    // Shell Validation Tests (Unix only - Windows has different shell handling)
     // ========================================================================
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_allowed_shells_list_is_not_empty() {
         assert!(!ALLOWED_SHELLS.is_empty());
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_allowed_shells_all_have_absolute_paths() {
         for shell in ALLOWED_SHELLS {
@@ -923,6 +925,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_default_shell_is_in_allowed_list() {
         assert!(
@@ -932,6 +935,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test_case("/bin/bash" ; "bin_bash")]
     #[test_case("/bin/zsh" ; "bin_zsh")]
     #[test_case("/bin/sh" ; "bin_sh")]
@@ -945,6 +949,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_returns_default_when_shell_unset() {
         // Save the original SHELL value
@@ -962,6 +967,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_rejects_relative_path() {
         let original = std::env::var("SHELL").ok();
@@ -980,6 +986,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_rejects_nonexistent_path() {
         let original = std::env::var("SHELL").ok();
@@ -998,6 +1005,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_accepts_valid_shell() {
         let original = std::env::var("SHELL").ok();
@@ -2442,6 +2450,7 @@ mod tests {
     // because the OS does not allow setting environment variables with null bytes.
     // This is a non-issue in practice since the attack vector doesn't exist.
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_rejects_path_traversal() {
         let original = std::env::var("SHELL").ok();
@@ -2461,6 +2470,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_rejects_suspicious_shells() {
         let original = std::env::var("SHELL").ok();
@@ -2491,6 +2501,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_empty_string() {
         let original = std::env::var("SHELL").ok();
@@ -2509,6 +2520,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_get_validated_shell_whitespace_only() {
         let original = std::env::var("SHELL").ok();
@@ -2868,6 +2880,7 @@ mod tests {
     // ========================================================================
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_allowed_shells_no_duplicates() {
         let mut seen = std::collections::HashSet::new();
         for shell in ALLOWED_SHELLS {
@@ -2880,6 +2893,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_allowed_shells_all_exist_or_are_common() {
         // At least one shell should exist on any Unix system
         let exists_count = ALLOWED_SHELLS
@@ -2894,6 +2908,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(target_os = "windows"))]
     fn test_default_shell_exists_or_is_common() {
         // DEFAULT_SHELL should be a common shell
         let common_shells = ["/bin/zsh", "/bin/bash", "/bin/sh"];
@@ -3583,8 +3598,9 @@ mod tests {
 
         // ==================== Shell Validation Tests ====================
 
-        /// Property: Allowed shells all start with /
+        /// Property: Allowed shells all start with / (Unix only)
         #[test]
+        #[cfg(not(target_os = "windows"))]
         fn prop_allowed_shells_absolute_paths(_idx in 0usize..ALLOWED_SHELLS.len()) {
             let shell = ALLOWED_SHELLS[_idx];
             prop_assert!(shell.starts_with('/'), "Shell '{}' should be absolute path", shell);
