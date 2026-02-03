@@ -610,8 +610,11 @@ impl TerminalPane {
             // Normal mode: scroll through terminal history (scrollback buffer)
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let lines = (delta_y.abs() / cell_height).ceil() as i32;
+
             if lines > 0 {
-                let scroll = if delta_y > 0.0 {
+                // GPUI: delta_y < 0 = scroll up gesture, delta_y > 0 = scroll down
+                // Scroll::Delta(positive) = scroll viewport up (show older content)
+                let scroll = if delta_y < 0.0 {
                     Scroll::Delta(lines)
                 } else {
                     Scroll::Delta(-lines)
@@ -742,11 +745,13 @@ impl TerminalPane {
         if event.keystroke.modifiers.alt && !event.keystroke.modifiers.shift {
             match event.keystroke.key.as_str() {
                 "left" => {
-                    self.send_input("\x1bb"); // ESC + b = backward word
+                    // ESC + b = backward word (works in bash/zsh with default bindings)
+                    self.send_input("\x1bb");
                     return;
                 }
                 "right" => {
-                    self.send_input("\x1bf"); // ESC + f = forward word
+                    // ESC + f = forward word (works in bash/zsh with default bindings)
+                    self.send_input("\x1bf");
                     return;
                 }
                 _ => {}
@@ -841,85 +846,10 @@ impl TerminalPane {
 
     /// Get selected text from terminal using alacritty's selection
     fn get_selected_text(&self) -> Option<String> {
+        // Use alacritty_terminal's built-in selection_to_string which properly
+        // handles all selection types and iterates through the full grid (including scrollback)
         let term = self.term.lock();
-        let content = term.renderable_content();
-
-        // Get selection range from renderable content
-        let selection_range = content.selection?;
-        let start = selection_range.start;
-        let end = selection_range.end;
-
-        // Line numbers can be negative (scrollback) - use i32 for comparison
-        let start_line = start.line.0;
-        let start_col = start.column.0;
-        let end_line = end.line.0;
-        let end_col = end.column.0;
-
-        // Stream directly from display_iter - no intermediate grid allocation
-        let mut result = String::new();
-        let mut current_line: Option<i32> = None;
-        let mut row_content = String::new();
-
-        for cell in content.display_iter {
-            let line = cell.point.line.0;
-            let col = cell.point.column.0;
-
-            // Skip cells outside selection (handle negative line numbers)
-            if line < start_line || line > end_line {
-                continue;
-            }
-            if line == start_line && col < start_col {
-                continue;
-            }
-            if line == end_line && col > end_col {
-                continue;
-            }
-            if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                continue;
-            }
-
-            // Handle row transitions
-            if current_line != Some(line) {
-                if let Some(prev_line) = current_line {
-                    // Flush previous row (trim trailing spaces, add newline)
-                    let trimmed = row_content.trim_end();
-                    result.push_str(trimmed);
-                    result.push('\n');
-                    row_content.clear();
-
-                    // Fill gaps if we skipped rows
-                    for _ in (prev_line + 1)..line {
-                        result.push('\n');
-                    }
-                }
-                current_line = Some(line);
-            }
-
-            // Pad with spaces if we skipped columns
-            let target_col = if line == start_line {
-                col.saturating_sub(start_col)
-            } else {
-                col
-            };
-            while row_content.chars().count() < target_col {
-                row_content.push(' ');
-            }
-
-            row_content.push(cell.c);
-        }
-
-        // Flush last row
-        let trimmed = row_content.trim_end();
-        result.push_str(trimmed);
-
-        // Trim trailing whitespace from entire result
-        let result = result.trim_end().to_string();
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
+        term.selection_to_string()
     }
 
     /// Copy selection to clipboard
@@ -956,15 +886,23 @@ impl TerminalPane {
         let mut term = self.term.lock();
         let cols = term.columns();
 
-        // Get current selection or cursor position
+        // Get current selection or start from cursor position
+        // For keyboard selection, always anchor at the cursor, not a mouse position
         let content = term.renderable_content();
+        let cursor = content.cursor.point;
         let (start_point, current_end) = if let Some(sel_range) = content.selection {
-            (
-                TermPoint::new(sel_range.start.line, sel_range.start.column),
-                TermPoint::new(sel_range.end.line, sel_range.end.column),
-            )
+            // If selection start matches cursor, extend from there
+            // Otherwise start fresh from cursor (user clicked elsewhere with mouse)
+            let sel_start = TermPoint::new(sel_range.start.line, sel_range.start.column);
+            if sel_start == cursor {
+                (
+                    sel_start,
+                    TermPoint::new(sel_range.end.line, sel_range.end.column),
+                )
+            } else {
+                (cursor, cursor)
+            }
         } else {
-            let cursor = content.cursor.point;
             (cursor, cursor)
         };
 
@@ -993,15 +931,23 @@ impl TerminalPane {
         let mut term = self.term.lock();
         let cols = term.columns();
 
-        // Get current selection end from renderable content, or use cursor position
+        // Get current selection or start from cursor position
+        // For keyboard selection, always anchor at the cursor, not a mouse position
         let content = term.renderable_content();
+        let cursor = content.cursor.point;
         let (start_point, current_end) = if let Some(sel_range) = content.selection {
-            (
-                TermPoint::new(sel_range.start.line, sel_range.start.column),
-                TermPoint::new(sel_range.end.line, sel_range.end.column),
-            )
+            // If selection start matches cursor, extend from there
+            // Otherwise start fresh from cursor (user clicked elsewhere with mouse)
+            let sel_start = TermPoint::new(sel_range.start.line, sel_range.start.column);
+            if sel_start == cursor {
+                (
+                    sel_start,
+                    TermPoint::new(sel_range.end.line, sel_range.end.column),
+                )
+            } else {
+                (cursor, cursor)
+            }
         } else {
-            let cursor = content.cursor.point;
             (cursor, cursor)
         };
 
@@ -1070,17 +1016,22 @@ impl TerminalPane {
         let cols = term.columns();
         let lines = term.screen_lines();
 
-        // Get current selection end from renderable content, or use cursor position
+        // Get current selection or start from cursor position
+        // For keyboard selection, always anchor at the cursor, not a mouse position
         let content = term.renderable_content();
+        let cursor = content.cursor.point;
         let (start_point, current_end) = if let Some(sel_range) = content.selection {
-            // Use existing selection's start as anchor, end as current position
-            (
-                TermPoint::new(sel_range.start.line, sel_range.start.column),
-                TermPoint::new(sel_range.end.line, sel_range.end.column),
-            )
+            let sel_start = TermPoint::new(sel_range.start.line, sel_range.start.column);
+            // Only extend existing selection if it started at cursor
+            if sel_start == cursor {
+                (
+                    sel_start,
+                    TermPoint::new(sel_range.end.line, sel_range.end.column),
+                )
+            } else {
+                (cursor, cursor)
+            }
         } else {
-            // No selection - start from cursor
-            let cursor = content.cursor.point;
             (cursor, cursor)
         };
 
@@ -1268,28 +1219,36 @@ fn build_render_data(
     let cursor_line = content.cursor.point.line.0;
     let cursor_col = content.cursor.point.column.0;
     let cursor_shape = content.cursor.shape;
+    let display_offset = content.display_offset as i32;
 
     // Use terminal's actual dimensions for cursor bounds check
     // to avoid issues when display size and terminal size are temporarily out of sync
     let term_cols = term.columns();
     let term_rows = term.screen_lines();
 
-    let cursor_info =
-        if cursor_line >= 0 && (cursor_line as usize) < term_rows && cursor_col < term_cols {
-            Some(CursorInfo {
-                row: cursor_line as usize,
-                col: cursor_col,
-                shape: cursor_shape,
-                color: theme.cursor,
-            })
-        } else {
-            None
-        };
+    // Convert cursor line to visual row (accounting for scroll position)
+    let cursor_visual_row = cursor_line + display_offset;
+    let cursor_info = if cursor_visual_row >= 0
+        && (cursor_visual_row as usize) < term_rows
+        && cursor_col < term_cols
+    {
+        Some(CursorInfo {
+            row: cursor_visual_row as usize,
+            col: cursor_col,
+            shape: cursor_shape,
+            color: theme.cursor,
+        })
+    } else {
+        // Cursor is scrolled off screen
+        None
+    };
 
     // Process cells from terminal content
     for cell in content.display_iter {
         let point = cell.point;
-        let row = point.line.0 as usize;
+        // Convert line number to visual row: when scrolled, line numbers can be negative
+        // Visual row = line + display_offset (e.g., Line(-5) + offset 5 = row 0)
+        let row = (point.line.0 + display_offset) as usize;
         let col = point.column.0;
 
         if row >= term_rows || col >= term_cols {
@@ -1574,6 +1533,8 @@ impl Render for TerminalPane {
                         );
                         // Get selection from renderable content (already normalized)
                         let selection_range = term_guard.renderable_content().selection;
+                        // Get display offset for converting selection coordinates to visual rows
+                        let display_offset = term_guard.grid().display_offset() as i32;
                         drop(term_guard);
 
                         // Use theme selection color with alpha for transparency
@@ -1590,6 +1551,7 @@ impl Render for TerminalPane {
                             selection_color,
                             font_family_clone,
                             current_font_size,
+                            display_offset,
                         )
                     },
                     // Paint: draw backgrounds and cell-by-cell text
@@ -1605,6 +1567,7 @@ impl Render for TerminalPane {
                             selection_color,
                             font_family,
                             font_size,
+                            display_offset,
                         ) = data;
 
                         let origin = bounds.origin;
@@ -1630,32 +1593,38 @@ impl Render for TerminalPane {
                                 && sel.start.column == sel.end.column;
 
                             if !start_same_as_end {
-                                // SelectionRange uses viewport coordinates
-                                // Negative line numbers = scrollback history (not visible)
-                                // We need to clamp to visible viewport (0..rows)
+                                // SelectionRange uses absolute line coordinates
+                                // Convert to visual rows by adding display_offset
                                 let start_line = sel.start.line.0;
                                 let end_line = sel.end.line.0;
 
-                                // Clamp selection to visible viewport
-                                let visible_start_row = start_line.max(0) as usize;
+                                // Convert to visual rows (like we do for cell rendering)
+                                let start_visual = start_line + display_offset;
+                                let end_visual = end_line + display_offset;
+
+                                // Clamp to visible viewport (0..rows)
+                                let visible_start_row = start_visual.max(0) as usize;
                                 let visible_end_row =
-                                    (end_line.max(0) as usize).min(rows.saturating_sub(1));
+                                    (end_visual.max(0) as usize).min(rows.saturating_sub(1));
 
                                 // Only render if any part is visible
-                                if visible_start_row <= visible_end_row && end_line >= 0 {
+                                if visible_start_row <= visible_end_row
+                                    && end_visual >= 0
+                                    && start_visual < rows as i32
+                                {
                                     let start_col = sel.start.column.0;
                                     let end_col = sel.end.column.0;
 
                                     for row in visible_start_row..=visible_end_row {
                                         // For rows that are fully in the selection, select entire row
                                         let col_start =
-                                            if row == visible_start_row && start_line >= 0 {
+                                            if row == visible_start_row && start_visual >= 0 {
                                                 start_col
                                             } else {
                                                 0
                                             };
                                         let col_end =
-                                            if row == visible_end_row && end_line == row as i32 {
+                                            if row == visible_end_row && end_visual == row as i32 {
                                                 end_col + 1
                                             } else {
                                                 cols
