@@ -38,11 +38,15 @@ if [ -d "themes" ]; then
     echo "    Copied themes/"
 fi
 
-# Create a simple icon if none exists (placeholder)
-if [ ! -f "resources/AppIcon.icns" ]; then
-    echo "    Note: No AppIcon.icns found, app will use default icon"
-else
+# Copy app icon
+if [ -f "resources/AppIcon.icns" ]; then
     cp "resources/AppIcon.icns" "${RESOURCES_DIR}/"
+    echo "    Copied AppIcon.icns"
+elif [ -f "resources/VolumeIcon.icns" ]; then
+    cp "resources/VolumeIcon.icns" "${RESOURCES_DIR}/AppIcon.icns"
+    echo "    Copied VolumeIcon.icns as AppIcon.icns"
+else
+    echo "    Note: No icon found, app will use default icon"
 fi
 
 # Sign the app (ad-hoc for local testing)
@@ -69,11 +73,31 @@ cp -r "${APP_DIR}" "${DMG_TMP}/"
 # Create symlink to Applications
 ln -s /Applications "${DMG_TMP}/Applications"
 
-# Create DMG
+# Add volume icon if available
+if [ -f "resources/VolumeIcon.icns" ]; then
+    cp "resources/VolumeIcon.icns" "${DMG_TMP}/.VolumeIcon.icns"
+    echo "    Added custom DMG volume icon"
+fi
+
+# Create read-write DMG first (so we can set icon flag)
+DMG_RW="${DMG_PATH%.dmg}-rw.dmg"
 hdiutil create -volname "${APP_NAME}" \
     -srcfolder "${DMG_TMP}" \
-    -ov -format UDZO \
-    "${DMG_PATH}"
+    -ov -format UDRW \
+    "${DMG_RW}"
+
+# Set custom icon flag if volume icon was added
+if [ -f "resources/VolumeIcon.icns" ]; then
+    MOUNT_DIR=$(hdiutil attach "${DMG_RW}" -nobrowse -noverify | grep "/Volumes/" | sed 's/.*\(\/Volumes\/.*\)/\1/')
+    if [ -n "${MOUNT_DIR}" ]; then
+        SetFile -a C "${MOUNT_DIR}" 2>/dev/null || true
+        hdiutil detach "${MOUNT_DIR}" -quiet
+    fi
+fi
+
+# Convert to compressed read-only DMG
+hdiutil convert "${DMG_RW}" -format UDZO -o "${DMG_PATH}" -ov
+rm -f "${DMG_RW}"
 
 # Cleanup
 rm -rf "${DMG_TMP}"
