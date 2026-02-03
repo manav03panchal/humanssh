@@ -272,6 +272,43 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Create a new tab running a specific command.
+    pub fn new_tab_with_command(
+        &mut self,
+        command: &str,
+        args: &[&str],
+        title: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let cmd = command.to_string();
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let title_owned: SharedString = title.to_string().into();
+
+        let terminal = cx.new(move |cx| {
+            let args_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            TerminalPane::new_with_command(cx, &cmd, &args_refs)
+        });
+
+        #[cfg(not(test))]
+        cx.subscribe(&terminal, |this, _, _: &TerminalExitEvent, cx| {
+            this.force_cleanup(cx);
+        })
+        .detach();
+
+        let panes = PaneNode::new_leaf(terminal.into());
+        let active_pane = panes.first_leaf_id();
+
+        let tab = Tab {
+            id: Uuid::new_v4(),
+            fallback_title: title_owned,
+            panes,
+            active_pane,
+        };
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        cx.notify();
+    }
+
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.tabs.len() <= 1 {
             // Last tab - quit the app
@@ -587,6 +624,8 @@ impl Render for Workspace {
                     .h(px(38.0))
                     .w_full()
                     .bg(title_bar_bg)
+                    .border_b_1()
+                    .border_color(border_color)
                     .flex()
                     .pl(px(78.0))
                     .pr(px(8.0))

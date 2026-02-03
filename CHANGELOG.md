@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Disk usage display in status bar with color-coded percentage (green/yellow/red)
+- Tab bar bottom border for visual separation
+- Infrastructure for running commands in new tabs (`new_tab_with_command`)
 - PWD inheritance: new tabs and splits inherit working directory from active pane
 - Unfocused pane dimming (Ghostty-style 35% overlay) for visual focus indication
 - Pane abstraction (`PaneKind` enum) for extensible pane types (terminal, SSH, etc.)
@@ -27,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Roadmap section in README documenting planned features
 
 ### Changed
+- Drag-and-drop now pastes file paths instead of base64 encoding (reduces context window bloat for AI assistants)
 - **Breaking**: `PaneNode` now uses `PaneKind` enum instead of `Entity<TerminalPane>` directly
 - Extracted color conversion to `terminal/colors.rs` module
 - Extracted terminal data types to `terminal/types.rs` module

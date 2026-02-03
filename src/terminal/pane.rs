@@ -18,7 +18,6 @@ use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
-use base64::Engine;
 use gpui::*;
 use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
 
@@ -282,6 +281,127 @@ impl TerminalPane {
                         }
                     });
                     break; // Stop polling after exit
+                }
+            }
+        })
+        .detach();
+
+        pane
+    }
+
+    /// Create a new terminal pane running a specific command.
+    ///
+    /// # Arguments
+    /// * `cx` - GPUI context
+    /// * `command` - The command to run (e.g., "btop", "neofetch")
+    /// * `args` - Arguments to pass to the command
+    ///
+    /// This is used for opening system utilities from the status bar.
+    pub fn new_with_command(cx: &mut Context<Self>, command: &str, args: &[&str]) -> Self {
+        let display_state = DisplayState::default();
+        let size = display_state.size;
+
+        let listener = Listener::new();
+        let config = Config::default();
+        let term = Term::new(config, &size, listener.clone());
+        let term = Arc::new(Mutex::new(term));
+        let processor = Arc::new(Mutex::new(Processor::new()));
+
+        let (pty, spawn_error) =
+            match PtyHandler::spawn_command(size.rows, size.cols, command, args, None) {
+                Ok(pty) => (Some(pty), None),
+                Err(e) => {
+                    tracing::error!("Failed to spawn command {}: {}", command, e);
+                    (None, Some(e.to_string()))
+                }
+            };
+
+        let focus_handle = cx.focus_handle().tab_stop(false);
+
+        let pane = Self {
+            pty: Arc::new(Mutex::new(pty)),
+            term,
+            processor,
+            listener,
+            display: Arc::new(RwLock::new(display_state)),
+            dragging: false,
+            focus_handle,
+            exit_emitted: false,
+        };
+
+        if let Some(error) = spawn_error {
+            let error_msg = format!(
+                "\x1b[31m\x1b[1mError: Failed to run '{}'\x1b[0m\r\n\r\n{}\r\n\r\n\
+                 \x1b[33mTip:\x1b[0m Install the command with: brew install {}\r\n",
+                command, error, command
+            );
+            let mut term = pane.term.lock();
+            let mut processor = pane.processor.lock();
+            processor.advance(&mut *term, error_msg.as_bytes());
+        }
+
+        // Start PTY output processing
+        let term_clone = pane.term.clone();
+        let processor_clone = pane.processor.clone();
+        let pty_clone = pane.pty.clone();
+
+        cx.spawn(async move |this, cx| {
+            const ACTIVE_INTERVAL: u64 = 4;
+            const IDLE_INTERVAL: u64 = 50;
+            const IDLE_THRESHOLD: u32 = 5;
+
+            let mut idle_count = 0u32;
+
+            loop {
+                let interval = if idle_count >= IDLE_THRESHOLD {
+                    IDLE_INTERVAL
+                } else {
+                    ACTIVE_INTERVAL
+                };
+
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(interval))
+                    .await;
+
+                let (should_notify, has_data, is_exited) = {
+                    let pty_guard = pty_clone.lock();
+                    if let Some(ref pty) = *pty_guard {
+                        let is_exited = pty.has_exited();
+                        let output_chunks = pty.read_output();
+                        drop(pty_guard);
+                        if !output_chunks.is_empty() {
+                            let mut term = term_clone.lock();
+                            let mut processor = processor_clone.lock();
+                            for chunk in output_chunks {
+                                processor.advance(&mut *term, &chunk);
+                            }
+                            (true, true, is_exited)
+                        } else {
+                            (is_exited, false, is_exited)
+                        }
+                    } else {
+                        (true, false, true)
+                    }
+                };
+
+                if has_data {
+                    idle_count = 0;
+                } else {
+                    idle_count = idle_count.saturating_add(1);
+                }
+
+                if should_notify {
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                }
+
+                if is_exited {
+                    let _ = this.update(cx, |pane, cx| {
+                        if !pane.exit_emitted {
+                            pane.exit_emitted = true;
+                            cx.emit(TerminalExitEvent);
+                        }
+                    });
+                    break;
                 }
             }
         })
@@ -1155,7 +1275,7 @@ impl TerminalPane {
         cx.notify();
     }
 
-    /// Handle dropped files - converts images to base64 data URLs for AI assistants
+    /// Handle dropped files - pastes file paths for AI assistants to read directly
     fn handle_file_drop(&mut self, paths: &ExternalPaths, cx: &mut Context<Self>) {
         let paths = paths.paths();
         if paths.is_empty() {
@@ -1165,61 +1285,17 @@ impl TerminalPane {
         let mut output = String::new();
 
         for path in paths {
-            // Check if it's an image file by extension
-            let is_image = path
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    matches!(
-                        ext.to_lowercase().as_str(),
-                        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"
-                    )
-                })
-                .unwrap_or(false);
-
-            if is_image {
-                // Read and base64 encode image for AI assistants
-                match std::fs::read(path) {
-                    Ok(data) => {
-                        let mime = match path.extension().and_then(|e| e.to_str()) {
-                            Some("png") => "image/png",
-                            Some("jpg") | Some("jpeg") => "image/jpeg",
-                            Some("gif") => "image/gif",
-                            Some("webp") => "image/webp",
-                            Some("bmp") => "image/bmp",
-                            _ => "application/octet-stream",
-                        };
-                        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
-                        // Output as data URL (supported by Claude and other AI assistants)
-                        if !output.is_empty() {
-                            output.push(' ');
-                        }
-                        output.push_str(&format!("data:{};base64,{}", mime, encoded));
-                        tracing::info!("Encoded dropped image: {:?} ({} bytes)", path, data.len());
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to read dropped file {:?}: {}", path, e);
-                        // Fall back to path
-                        if !output.is_empty() {
-                            output.push(' ');
-                        }
-                        output.push_str(&path.to_string_lossy());
-                    }
-                }
+            if !output.is_empty() {
+                output.push(' ');
+            }
+            // Quote paths with spaces
+            let path_str = path.to_string_lossy();
+            if path_str.contains(' ') {
+                output.push('"');
+                output.push_str(&path_str);
+                output.push('"');
             } else {
-                // Non-image file: just paste the path
-                if !output.is_empty() {
-                    output.push(' ');
-                }
-                // Quote paths with spaces
-                let path_str = path.to_string_lossy();
-                if path_str.contains(' ') {
-                    output.push('"');
-                    output.push_str(&path_str);
-                    output.push('"');
-                } else {
-                    output.push_str(&path_str);
-                }
+                output.push_str(&path_str);
             }
         }
 

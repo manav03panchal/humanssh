@@ -280,6 +280,122 @@ impl PtyHandler {
         })
     }
 
+    /// Spawn a new PTY running a specific command.
+    ///
+    /// # Arguments
+    /// * `rows` - Initial terminal height in rows
+    /// * `cols` - Initial terminal width in columns
+    /// * `command` - The command to run (e.g., "btop", "neofetch")
+    /// * `args` - Arguments to pass to the command
+    /// * `working_dir` - Optional working directory
+    ///
+    /// # Returns
+    /// A new `PtyHandler` on success, or an error if spawning failed.
+    pub fn spawn_command(
+        rows: u16,
+        cols: u16,
+        command: &str,
+        args: &[&str],
+        working_dir: Option<&std::path::Path>,
+    ) -> Result<Self> {
+        let pty_system = native_pty_system();
+
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("Failed to open PTY")?;
+
+        let mut cmd = CommandBuilder::new(command);
+        for arg in args {
+            cmd.arg(*arg);
+        }
+        cmd.env("TERM", "xterm-256color");
+
+        // Set working directory if provided
+        if let Some(dir) = working_dir {
+            if dir.is_dir() {
+                cmd.cwd(dir);
+            }
+        }
+
+        // Ensure common paths are in PATH for macOS app bundles
+        if let Ok(current_path) = std::env::var("PATH") {
+            let homebrew_paths = "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin";
+            if !current_path.contains("/opt/homebrew") {
+                cmd.env("PATH", format!("{}:{}", homebrew_paths, current_path));
+            }
+        } else {
+            cmd.env(
+                "PATH",
+                "/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+            );
+        }
+
+        // Spawn the command
+        let child = pair
+            .slave
+            .spawn_command(cmd)
+            .context("Failed to spawn command")?;
+
+        // Get writer for sending input to PTY
+        let writer = pair
+            .master
+            .take_writer()
+            .context("Failed to get PTY writer")?;
+
+        // Get reader for receiving output from PTY
+        let mut reader = pair
+            .master
+            .try_clone_reader()
+            .context("Failed to get PTY reader")?;
+
+        const PTY_OUTPUT_QUEUE_SIZE: usize = 1024;
+        let (output_tx, output_rx): (SyncSender<Vec<u8>>, Receiver<Vec<u8>>) =
+            mpsc::sync_channel(PTY_OUTPUT_QUEUE_SIZE);
+
+        let exited = Arc::new(AtomicBool::new(false));
+        let exited_clone = exited.clone();
+
+        let reader_thread = thread::spawn(move || {
+            let mut buf = [0u8; 32768];
+            loop {
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        exited_clone.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                    Ok(n) => match output_tx.try_send(buf[..n].to_vec()) {
+                        Ok(()) => {}
+                        Err(TrySendError::Full(_)) => {
+                            tracing::trace!("PTY output queue full, dropping frame");
+                        }
+                        Err(TrySendError::Disconnected(_)) => {
+                            break;
+                        }
+                    },
+                    Err(_) => {
+                        exited_clone.store(true, Ordering::SeqCst);
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            pair,
+            writer,
+            output_rx,
+            exited,
+            child,
+            _reader_thread: reader_thread,
+            process_cache: std::sync::Mutex::new(ProcessCache::default()),
+        })
+    }
+
     /// Write input bytes to the PTY
     /// Note: No explicit flush - OS handles buffering efficiently for interactive input
     pub fn write(&mut self, data: &[u8]) -> Result<()> {

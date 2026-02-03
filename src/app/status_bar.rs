@@ -11,7 +11,7 @@ use gpui_component::Sizable;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::Instant;
-use sysinfo::{Networks, System};
+use sysinfo::{Disks, Networks, System};
 
 /// Collected system statistics.
 #[derive(Clone, Debug)]
@@ -56,6 +56,12 @@ pub struct SystemStats {
     /// Number of running processes.
     pub process_count: usize,
 
+    // Disk info
+    /// Disk used in bytes.
+    pub disk_used: u64,
+    /// Disk total in bytes.
+    pub disk_total: u64,
+
     // Terminal info
     /// Current shell name.
     pub shell: SharedString,
@@ -84,6 +90,8 @@ impl Default for SystemStats {
             network_rx_total: 0,
             network_tx_total: 0,
             process_count: 0,
+            disk_used: 0,
+            disk_total: 0,
             shell: "—".into(),
             cwd: "~".into(),
             process: "—".into(),
@@ -95,6 +103,7 @@ impl Default for SystemStats {
 pub struct SystemStatsCollector {
     system: System,
     networks: Networks,
+    disks: Disks,
     last_update: Instant,
     last_network_rx: u64,
     last_network_tx: u64,
@@ -108,6 +117,7 @@ impl SystemStatsCollector {
         system.refresh_all();
 
         let networks = Networks::new_with_refreshed_list();
+        let disks = Disks::new_with_refreshed_list();
 
         // Get static system info
         let hostname = System::host_name().unwrap_or_else(|| "localhost".to_string());
@@ -129,6 +139,7 @@ impl SystemStatsCollector {
         Self {
             system,
             networks,
+            disks,
             last_update: Instant::now(),
             last_network_rx: 0,
             last_network_tx: 0,
@@ -171,6 +182,30 @@ impl SystemStatsCollector {
             .refresh_processes(sysinfo::ProcessesToUpdate::All, true);
         let process_count = self.system.processes().len();
 
+        // Disk usage (aggregate all disks, focusing on root/main disk)
+        self.disks.refresh();
+        let (disk_used, disk_total) = {
+            let mut total: u64 = 0;
+            let mut available: u64 = 0;
+            for disk in self.disks.iter() {
+                // Focus on main disk (root mount point on macOS/Linux)
+                let mount = disk.mount_point().to_string_lossy();
+                if mount == "/" || mount.starts_with("/System/Volumes/Data") {
+                    total = disk.total_space();
+                    available = disk.available_space();
+                    break;
+                }
+            }
+            // Fallback: use first disk if no root found
+            if total == 0 {
+                if let Some(disk) = self.disks.iter().next() {
+                    total = disk.total_space();
+                    available = disk.available_space();
+                }
+            }
+            (total.saturating_sub(available), total)
+        };
+
         // Refresh network stats
         self.networks.refresh();
 
@@ -208,6 +243,8 @@ impl SystemStatsCollector {
         self.cached_stats.uptime_secs = uptime_secs;
         self.cached_stats.load_avg = load_avg;
         self.cached_stats.process_count = process_count;
+        self.cached_stats.disk_used = disk_used;
+        self.cached_stats.disk_total = disk_total;
         self.cached_stats.network_rx_per_sec = rx_per_sec;
         self.cached_stats.network_tx_per_sec = tx_per_sec;
         self.cached_stats.network_rx_total = total_rx;
@@ -366,11 +403,32 @@ pub fn render_status_bar(stats: &SystemStats, cx: &App) -> impl IntoElement {
         stats.process_count
     );
 
+    // Disk usage
+    let disk_percent = if stats.disk_total > 0 {
+        (stats.disk_used as f64 / stats.disk_total as f64 * 100.0) as f32
+    } else {
+        0.0
+    };
+    let disk_color = if disk_percent > 90.0 {
+        colors.red
+    } else if disk_percent > 70.0 {
+        colors.yellow
+    } else {
+        colors.green
+    };
+    let disk_tooltip = format!(
+        "Used: {}\nFree: {}\nTotal: {}",
+        format_bytes(stats.disk_used),
+        format_bytes(stats.disk_total.saturating_sub(stats.disk_used)),
+        format_bytes(stats.disk_total)
+    );
+
     div()
         .h(px(config::HEIGHT))
         .w_full()
         .bg(bg)
         .border_t_1()
+        .border_b_1()
         .border_color(border)
         .flex()
         .items_center()
@@ -419,6 +477,24 @@ pub fn render_status_bar(stats: &SystemStats, cx: &App) -> impl IntoElement {
                         .label(format_mem_percent(stats.memory_used, stats.memory_total))
                         .text_color(mem_color)
                         .tooltip(mem_tooltip),
+                ),
+        )
+        // Separator
+        .child(div().text_color(muted).child("│"))
+        // Disk with tooltip
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(div().text_color(muted).child("DISK"))
+                .child(
+                    Button::new("status-disk")
+                        .xsmall()
+                        .ghost()
+                        .label(format_mem_percent(stats.disk_used, stats.disk_total))
+                        .text_color(disk_color)
+                        .tooltip(disk_tooltip),
                 ),
         )
         // Separator
