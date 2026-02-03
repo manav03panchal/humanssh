@@ -204,9 +204,9 @@ impl TerminalPane {
 
         cx.spawn(async move |this, cx| {
             // Adaptive polling intervals (in ms)
-            const ACTIVE_INTERVAL: u64 = 8; // Fast when data flowing
-            const IDLE_INTERVAL: u64 = 100; // Slow when idle
-            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
+            const ACTIVE_INTERVAL: u64 = 4; // Fast when data flowing (~250fps)
+            const IDLE_INTERVAL: u64 = 50; // Slow when idle
+            const IDLE_THRESHOLD: u32 = 5; // Cycles without data before going idle
 
             let mut idle_count = 0u32;
 
