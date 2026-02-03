@@ -849,28 +849,29 @@ impl TerminalPane {
         let start = selection_range.start;
         let end = selection_range.end;
 
-        let start_row = start.line.0 as usize;
+        // Line numbers can be negative (scrollback) - use i32 for comparison
+        let start_line = start.line.0;
         let start_col = start.column.0;
-        let end_row = end.line.0 as usize;
+        let end_line = end.line.0;
         let end_col = end.column.0;
 
         // Stream directly from display_iter - no intermediate grid allocation
         let mut result = String::new();
-        let mut current_row = start_row;
+        let mut current_line: Option<i32> = None;
         let mut row_content = String::new();
 
         for cell in content.display_iter {
-            let row = cell.point.line.0 as usize;
+            let line = cell.point.line.0;
             let col = cell.point.column.0;
 
-            // Skip cells outside selection
-            if row < start_row || row > end_row {
+            // Skip cells outside selection (handle negative line numbers)
+            if line < start_line || line > end_line {
                 continue;
             }
-            if row == start_row && col < start_col {
+            if line == start_line && col < start_col {
                 continue;
             }
-            if row == end_row && col > end_col {
+            if line == end_line && col > end_col {
                 continue;
             }
             if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
@@ -878,23 +879,25 @@ impl TerminalPane {
             }
 
             // Handle row transitions
-            if row != current_row {
-                // Flush previous row (trim trailing spaces, add newline)
-                let trimmed = row_content.trim_end();
-                result.push_str(trimmed);
-                result.push('\n');
-                row_content.clear();
-
-                // Fill gaps if we skipped rows
-                for _ in (current_row + 1)..row {
+            if current_line != Some(line) {
+                if let Some(prev_line) = current_line {
+                    // Flush previous row (trim trailing spaces, add newline)
+                    let trimmed = row_content.trim_end();
+                    result.push_str(trimmed);
                     result.push('\n');
+                    row_content.clear();
+
+                    // Fill gaps if we skipped rows
+                    for _ in (prev_line + 1)..line {
+                        result.push('\n');
+                    }
                 }
-                current_row = row;
+                current_line = Some(line);
             }
 
             // Pad with spaces if we skipped columns
-            let target_col = if row == start_row {
-                col - start_col
+            let target_col = if line == start_line {
+                col.saturating_sub(start_col)
             } else {
                 col
             };
@@ -931,7 +934,8 @@ impl TerminalPane {
         let mut term = self.term.lock();
         let cols = term.columns();
 
-        // Get the topmost line (including scrollback) and bottommost line
+        // topmost_line returns negative Line for scrollback history
+        // bottommost_line returns the last visible line
         let topmost = term.topmost_line();
         let bottommost = term.bottommost_line();
 
@@ -943,7 +947,7 @@ impl TerminalPane {
         selection.update(end, Side::Right);
         term.selection = Some(selection);
 
-        // Scroll to bottom to show the selection includes current content
+        // Scroll to bottom to show current content is selected
         term.scroll_display(Scroll::Bottom);
     }
 
@@ -1556,9 +1560,9 @@ impl Render for TerminalPane {
                         }
 
                         // Get current size for rendering
-                        let cols = {
+                        let (cols, rows) = {
                             let display = display_arc.read();
-                            display.size.cols as usize
+                            (display.size.cols as usize, display.size.rows as usize)
                         };
 
                         // Build render data from terminal state and get selection
@@ -1582,6 +1586,7 @@ impl Render for TerminalPane {
                             cell_height,
                             selection_range,
                             cols,
+                            rows,
                             selection_color,
                             font_family_clone,
                             current_font_size,
@@ -1596,6 +1601,7 @@ impl Render for TerminalPane {
                             cell_height,
                             selection_range,
                             cols,
+                            rows,
                             selection_color,
                             font_family,
                             font_size,
@@ -1624,22 +1630,36 @@ impl Render for TerminalPane {
                                 && sel.start.column == sel.end.column;
 
                             if !start_same_as_end {
-                                // SelectionRange uses viewport coordinates (line.0 >= 0 for visible lines)
+                                // SelectionRange uses viewport coordinates
+                                // Negative line numbers = scrollback history (not visible)
+                                // We need to clamp to visible viewport (0..rows)
                                 let start_line = sel.start.line.0;
                                 let end_line = sel.end.line.0;
 
-                                // Only render if within visible viewport
-                                if start_line >= 0 && end_line >= 0 {
-                                    let start_row = start_line as usize;
+                                // Clamp selection to visible viewport
+                                let visible_start_row = start_line.max(0) as usize;
+                                let visible_end_row =
+                                    (end_line.max(0) as usize).min(rows.saturating_sub(1));
+
+                                // Only render if any part is visible
+                                if visible_start_row <= visible_end_row && end_line >= 0 {
                                     let start_col = sel.start.column.0;
-                                    let end_row = end_line as usize;
                                     let end_col = sel.end.column.0;
 
-                                    for row in start_row..=end_row {
+                                    for row in visible_start_row..=visible_end_row {
+                                        // For rows that are fully in the selection, select entire row
                                         let col_start =
-                                            if row == start_row { start_col } else { 0 };
+                                            if row == visible_start_row && start_line >= 0 {
+                                                start_col
+                                            } else {
+                                                0
+                                            };
                                         let col_end =
-                                            if row == end_row { end_col + 1 } else { cols };
+                                            if row == visible_end_row && end_line == row as i32 {
+                                                end_col + 1
+                                            } else {
+                                                cols
+                                            };
 
                                         let x =
                                             origin.x + px(PADDING + col_start as f32 * cell_width);
