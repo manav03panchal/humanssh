@@ -449,13 +449,23 @@ impl TerminalPane {
         None
     }
 
-    /// Extract text content from a terminal row.
-    fn get_row_text(&self, row: usize) -> String {
+    /// Extract text content from a visual terminal row (accounting for scroll).
+    /// `visual_row` is 0 = top of viewport, not the grid line number.
+    fn get_row_text(&self, visual_row: usize) -> String {
         let term = self.term.lock();
         let grid = term.grid();
-        let line = Line(row as i32);
+        let display_offset = grid.display_offset() as i32;
 
-        if line.0 < 0 || line.0 >= grid.screen_lines() as i32 {
+        // Convert visual row to grid line (accounting for scroll)
+        let line = Line(visual_row as i32 - display_offset);
+
+        // Check bounds: grid supports negative lines for scrollback
+        // The valid range is roughly -history_size to screen_lines-1
+        let total_lines = grid.total_lines();
+        let screen_lines = grid.screen_lines() as i32;
+        let min_line = -(total_lines as i32 - screen_lines);
+
+        if line.0 < min_line || line.0 >= screen_lines {
             return String::new();
         }
 
@@ -523,9 +533,14 @@ impl TerminalPane {
             self.send_input(&seq);
         } else if event.button == MouseButton::Left {
             // Start text selection using alacritty's Selection
-            let point = TermPoint::new(Line(row as i32), Column(col));
+            // Convert visual row to grid line (accounting for scroll offset)
+            let mut term = self.term.lock();
+            let display_offset = term.grid().display_offset() as i32;
+            let line = Line(row as i32 - display_offset);
+            let point = TermPoint::new(line, Column(col));
             let selection = TermSelection::new(SelectionType::Simple, point, Side::Left);
-            self.term.lock().selection = Some(selection);
+            term.selection = Some(selection);
+            drop(term);
             self.dragging = true;
             cx.notify();
         }
@@ -566,10 +581,15 @@ impl TerminalPane {
         } else if event.button == MouseButton::Left {
             // End text selection
             if self.dragging {
-                let point = TermPoint::new(Line(row as i32), Column(col));
-                if let Some(ref mut selection) = self.term.lock().selection {
+                // Convert visual row to grid line (accounting for scroll offset)
+                let mut term = self.term.lock();
+                let display_offset = term.grid().display_offset() as i32;
+                let line = Line(row as i32 - display_offset);
+                let point = TermPoint::new(line, Column(col));
+                if let Some(ref mut selection) = term.selection {
                     selection.update(point, Side::Right);
                 }
+                drop(term);
                 self.dragging = false;
                 cx.notify();
             }
@@ -584,8 +604,12 @@ impl TerminalPane {
 
         // Update selection if dragging
         if self.dragging {
-            let point = TermPoint::new(Line(row as i32), Column(col));
-            if let Some(ref mut selection) = self.term.lock().selection {
+            // Convert visual row to grid line (accounting for scroll offset)
+            let mut term = self.term.lock();
+            let display_offset = term.grid().display_offset() as i32;
+            let line = Line(row as i32 - display_offset);
+            let point = TermPoint::new(line, Column(col));
+            if let Some(ref mut selection) = term.selection {
                 selection.update(point, Side::Right);
             }
             cx.notify();
