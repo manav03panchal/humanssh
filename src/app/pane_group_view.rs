@@ -6,37 +6,30 @@
 use super::pane_group::{PaneNode, SplitDirection};
 use super::workspace::Workspace;
 use crate::theme::terminal_colors;
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 
 /// Render a pane tree as a GPUI element.
 ///
 /// Recursively builds nested flex containers for splits and terminal views for leaves.
-/// The active pane is highlighted with an accent border.
 pub fn render_pane_tree(
     node: &PaneNode,
-    active_pane: Uuid,
+    _active_pane: Uuid,
     _window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) -> AnyElement {
     // Get theme colors
     let colors = terminal_colors(cx);
-    let accent = colors.accent;
     let border = colors.border;
 
     match node {
         PaneNode::Leaf { id, pane } => {
-            let is_active = *id == active_pane;
             let pane_id = *id;
 
             div()
                 .id(ElementId::Name(format!("pane-{}", id).into()))
                 .size_full()
-                .border_1()
                 .bg(colors.background)
-                .when(is_active, |d| d.border_color(accent))
-                .when(!is_active, |d| d.border_color(border))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.set_active_pane(pane_id, cx);
                 }))
@@ -51,8 +44,8 @@ pub fn render_pane_tree(
         } => {
             let ratio = *ratio;
 
-            let first_elem = render_pane_tree(first, active_pane, _window, cx);
-            let second_elem = render_pane_tree(second, active_pane, _window, cx);
+            let first_elem = render_pane_tree(first, _active_pane, _window, cx);
+            let second_elem = render_pane_tree(second, _active_pane, _window, cx);
 
             match direction {
                 SplitDirection::Horizontal => div()
