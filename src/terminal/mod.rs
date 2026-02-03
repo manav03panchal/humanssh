@@ -43,5 +43,16 @@ mod pane;
 mod pty_handler;
 pub mod types;
 
-pub use pane::{TerminalExitEvent, TerminalPane};
+pub use pane::{SendShiftTab, SendTab, TerminalExitEvent, TerminalPane};
 pub use pty_handler::PtyHandler;
+
+/// Register terminal-specific keybindings.
+/// Call this during app initialization.
+pub fn register_keybindings(cx: &mut gpui::App) {
+    use gpui::KeyBinding;
+    cx.bind_keys([
+        // Tab key - bound to terminal context to bypass GPUI's focus navigation
+        KeyBinding::new("tab", SendTab, Some("terminal")),
+        KeyBinding::new("shift-tab", SendShiftTab, Some("terminal")),
+    ]);
+}

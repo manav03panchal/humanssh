@@ -139,6 +139,10 @@ fn initialize_subsystems(cx: &mut App) {
     debug!("Theme system initialized");
 
     register_keybindings(cx);
+
+    // Register terminal-specific keybindings (Tab, etc.)
+    humanssh::terminal::register_keybindings(cx);
+    debug!("Terminal keybindings registered");
 }
 
 fn main() {

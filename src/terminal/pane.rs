@@ -12,7 +12,7 @@ use super::types::{
 use super::PtyHandler;
 use crate::theme::{terminal_colors, TerminalColors};
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as TermPoint, Side};
 use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
@@ -20,6 +20,9 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use base64::Engine;
 use gpui::*;
+
+// Terminal-specific actions to capture keys before GPUI's focus system
+actions!(terminal, [SendTab, SendShiftTab]);
 use parking_lot::{Mutex, RwLock};
 use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
@@ -168,7 +171,9 @@ impl TerminalPane {
             }
         };
 
-        let focus_handle = cx.focus_handle();
+        // Disable tab stop so Tab key passes through to the terminal instead of
+        // being consumed by GPUI's focus navigation system
+        let focus_handle = cx.focus_handle().tab_stop(false);
 
         let pane = Self {
             pty: Arc::new(Mutex::new(pty)),
@@ -600,6 +605,18 @@ impl TerminalPane {
 
             for _ in 0..lines.min(5) {
                 self.send_input(key);
+            }
+        } else {
+            // Normal mode: scroll through terminal history (scrollback buffer)
+            let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
+            let lines = (delta_y.abs() / cell_height).ceil() as i32;
+            if lines > 0 {
+                let scroll = if delta_y > 0.0 {
+                    Scroll::Delta(lines)
+                } else {
+                    Scroll::Delta(-lines)
+                };
+                self.term.lock().scroll_display(scroll);
             }
         }
     }
@@ -1134,6 +1151,13 @@ impl Render for TerminalPane {
             .id("terminal-pane")
             .key_context("terminal")
             .track_focus(&focus_handle)
+            // Handle Tab/Shift-Tab actions (bound below) to send to terminal
+            .on_action(cx.listener(|this, _: &SendTab, _window, _cx| {
+                this.send_input("\t");
+            }))
+            .on_action(cx.listener(|this, _: &SendShiftTab, _window, _cx| {
+                this.send_input("\x1b[Z"); // Shift-Tab escape sequence
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if event.keystroke.modifiers.platform && event.keystroke.key.as_str() == "," {
                     crate::app::toggle_settings_dialog(window, cx);
@@ -1183,8 +1207,9 @@ impl Render for TerminalPane {
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _window, cx| {
                 this.handle_mouse_move(event, cx);
             }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, _cx| {
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
                 this.handle_scroll(event);
+                cx.notify(); // Redraw after scrolling
             }))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _window, cx| {
                 this.handle_file_drop(paths, cx);
