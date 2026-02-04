@@ -20,6 +20,18 @@ pub struct SwitchFont(pub SharedString);
 #[action(namespace = theme, no_json)]
 pub struct SwitchThemeMode(pub ThemeMode);
 
+/// Action to switch Windows shell (Windows only)
+#[cfg(target_os = "windows")]
+#[derive(Clone, PartialEq, Debug, gpui::Action)]
+#[action(namespace = theme, no_json)]
+pub struct SwitchShell(pub super::persistence::WindowsShell);
+
+/// Action to switch Linux window decorations (Linux only)
+#[cfg(target_os = "linux")]
+#[derive(Clone, PartialEq, Debug, gpui::Action)]
+#[action(namespace = theme, no_json)]
+pub struct SwitchDecorations(pub super::persistence::LinuxDecorations);
+
 /// Register theme switching actions
 pub fn register_actions(cx: &mut App) {
     cx.on_action(|action: &SwitchTheme, cx| {
@@ -38,6 +50,22 @@ pub fn register_actions(cx: &mut App) {
 
     cx.on_action(|action: &SwitchThemeMode, cx| {
         Theme::change(action.0, None, cx);
+        cx.refresh_windows();
+    });
+
+    // Register shell switching action (Windows only)
+    #[cfg(target_os = "windows")]
+    cx.on_action(|action: &SwitchShell, cx| {
+        super::persistence::save_windows_shell(action.0.clone());
+        tracing::info!("Switched to shell: {:?}", action.0);
+        cx.refresh_windows();
+    });
+
+    // Register decoration switching action (Linux only)
+    #[cfg(target_os = "linux")]
+    cx.on_action(|action: &SwitchDecorations, cx| {
+        super::persistence::save_linux_decorations(action.0.clone());
+        tracing::info!("Switched to decorations: {:?} (restart required)", action.0);
         cx.refresh_windows();
     });
 }

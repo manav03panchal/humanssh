@@ -25,12 +25,20 @@ mod colors;
 mod persistence;
 
 // Re-export public API
+#[cfg(target_os = "linux")]
+pub use actions::SwitchDecorations;
+#[cfg(target_os = "windows")]
+pub use actions::SwitchShell;
 pub use actions::{SwitchFont, SwitchTheme, SwitchThemeMode};
 pub use colors::{terminal_colors, TerminalColors};
+#[cfg(target_os = "linux")]
+pub use persistence::{load_linux_decorations, save_linux_decorations};
 pub use persistence::{
-    load_settings, load_window_bounds, save_settings, save_window_bounds, Settings,
-    WindowBoundsConfig,
+    load_settings, load_window_bounds, save_settings, save_window_bounds, LinuxDecorations,
+    Settings, WindowBoundsConfig, WindowsShell,
 };
+#[cfg(target_os = "windows")]
+pub use persistence::{load_windows_shell, save_windows_shell};
 
 use gpui::App;
 use gpui_component::theme::{Theme, ThemeRegistry};
@@ -46,18 +54,21 @@ pub fn init(cx: &mut App) {
         .unwrap_or_else(|| "Catppuccin Mocha".to_string());
     let saved_font = saved_settings.font_family;
 
-    // Apply saved font family if present (consumes the Option)
-    if let Some(font_family) = saved_font {
-        Theme::global_mut(cx).font_family = font_family.into();
-    }
+    // Apply saved font family if present, otherwise use platform default
+    use crate::config::terminal::FONT_FAMILY;
+    let font_to_apply = saved_font.unwrap_or_else(|| FONT_FAMILY.to_string());
+    // Clone font for closure before moving into .into()
+    let font_for_closure = font_to_apply.clone();
+    Theme::global_mut(cx).font_family = font_to_apply.into();
 
     // Find and watch themes directory
     if let Some(themes_dir) = find_themes_dir() {
         tracing::info!("Loading themes from: {:?}", themes_dir);
-
-        // Clone only once for the closure that outlives this scope
         let theme_for_closure = saved_theme.clone();
         if let Err(e) = ThemeRegistry::watch_dir(themes_dir, cx, move |cx| {
+            // Save our font before applying theme (apply_config resets it)
+            let our_font = font_for_closure.clone();
+
             // Apply saved theme when themes are loaded
             if let Some(theme) = ThemeRegistry::global(cx)
                 .themes()
@@ -74,6 +85,11 @@ pub fn init(cx: &mut App) {
                 Theme::global_mut(cx).apply_config(&theme);
                 tracing::info!("Applied default theme: Catppuccin Mocha");
             }
+
+            // Re-apply our font after theme loaded (theme reset it to .SystemUIFont)
+            tracing::info!("Re-applying font after theme load: {}", our_font);
+            Theme::global_mut(cx).font_family = our_font.clone().into();
+            tracing::info!("Font now set to: {}", Theme::global(cx).font_family);
         }) {
             tracing::warn!("Failed to watch themes directory: {}", e);
         }
@@ -340,6 +356,7 @@ mod tests {
                 theme: Some("Tokyo Night".to_string()),
                 font_family: None,
                 window_bounds: None,
+                ..Default::default()
             };
 
             // Serialize and deserialize
@@ -355,6 +372,7 @@ mod tests {
                 theme: None,
                 font_family: Some("JetBrains Mono".to_string()),
                 window_bounds: None,
+                ..Default::default()
             };
 
             let json = serde_json::to_string(&settings).unwrap();
@@ -374,6 +392,7 @@ mod tests {
                     width: 1920.0,
                     height: 1080.0,
                 }),
+                ..Default::default()
             };
 
             let json = serde_json::to_string_pretty(&settings).unwrap();
