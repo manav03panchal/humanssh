@@ -784,7 +784,7 @@ impl PtyHandler {
                     }
                 }
             }
-            return (false, None);
+            (false, None)
         }
 
         // macOS/BSD: use pgrep
