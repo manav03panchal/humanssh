@@ -10,7 +10,7 @@ use crate::theme::{SwitchFont, SwitchTheme};
 use gpui::{div, px, App, IntoElement, ParentElement, SharedString, Styled, Window};
 use gpui_component::button::Button;
 use gpui_component::menu::DropdownMenu;
-use gpui_component::theme::ThemeRegistry;
+use gpui_component::theme::{Theme, ThemeRegistry};
 use gpui_component::{v_flex, ActiveTheme, StyledExt, WindowExt};
 
 /// Common monospace fonts for terminals (macOS).
@@ -76,7 +76,14 @@ pub fn toggle_settings_dialog(window: &mut Window, cx: &mut App) {
 #[cfg(target_os = "macos")]
 pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
     let current_theme = cx.theme().theme_name().clone();
-    let current_font = cx.theme().font_family.to_string();
+    // Use Theme::global directly to ensure we read from the same source that's modified
+    let current_font = Theme::global(cx).font_family.to_string();
+    let cx_theme_font = cx.theme().font_family.to_string();
+    tracing::info!(
+        "Settings dialog: Theme::global font={}, cx.theme font={}",
+        current_font,
+        cx_theme_font
+    );
 
     v_flex()
         .gap_4()
@@ -130,7 +137,7 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
                         .outline()
                         .w_full()
                         .dropdown_menu(move |menu, _, cx| {
-                            let current = cx.theme().font_family.to_string();
+                            let current = Theme::global(cx).font_family.to_string();
                             let mut menu = menu.min_w(px(200.0));
                             for font in TERMINAL_FONTS {
                                 let is_current = current == *font;
@@ -158,7 +165,7 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
 #[cfg(target_os = "windows")]
 pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
     let current_theme = cx.theme().theme_name().clone();
-    let current_font = cx.theme().font_family.to_string();
+    let current_font = Theme::global(cx).font_family.to_string();
     let current_shell = load_windows_shell();
 
     v_flex()
@@ -213,7 +220,7 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
                         .outline()
                         .w_full()
                         .dropdown_menu(move |menu, _, cx| {
-                            let current = cx.theme().font_family.to_string();
+                            let current = Theme::global(cx).font_family.to_string();
                             let mut menu = menu.min_w(px(200.0));
                             for font in TERMINAL_FONTS {
                                 let is_current = current == *font;
@@ -271,7 +278,7 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
 #[cfg(target_os = "linux")]
 pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
     let current_theme = cx.theme().theme_name().clone();
-    let current_font = cx.theme().font_family.to_string();
+    let current_font = Theme::global(cx).font_family.to_string();
     let current_decorations = load_linux_decorations();
 
     v_flex()
@@ -326,7 +333,7 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
                         .outline()
                         .w_full()
                         .dropdown_menu(move |menu, _, cx| {
-                            let current = cx.theme().font_family.to_string();
+                            let current = Theme::global(cx).font_family.to_string();
                             let mut menu = menu.min_w(px(200.0));
                             for font in TERMINAL_FONTS {
                                 let is_current = current == *font;

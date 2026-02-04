@@ -47,6 +47,8 @@ pub fn register_actions(cx: &mut App) {
     });
 
     cx.on_action(|action: &SwitchFont, cx| {
+        // Update our intended font tracker
+        super::set_intended_font(action.0.to_string());
         Theme::global_mut(cx).font_family = action.0.clone();
         tracing::info!("Switched to font: {}", action.0);
         cx.refresh_windows();

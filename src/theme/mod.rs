@@ -42,8 +42,30 @@ pub use persistence::{load_windows_shell, save_windows_shell};
 
 use gpui::App;
 use gpui_component::theme::{Theme, ThemeRegistry};
-use gpui_component::ActiveTheme;
+use parking_lot::Mutex;
 use std::path::PathBuf;
+use std::sync::OnceLock;
+
+/// Stores the user's intended font preference.
+/// This survives across apply_config calls that reset font_family to .SystemUIFont.
+static INTENDED_FONT: OnceLock<Mutex<String>> = OnceLock::new();
+
+/// Get the user's intended font (read from settings or default)
+fn get_intended_font() -> String {
+    INTENDED_FONT
+        .get()
+        .map(|m| m.lock().clone())
+        .unwrap_or_else(|| crate::config::terminal::FONT_FAMILY.to_string())
+}
+
+/// Set the user's intended font
+pub fn set_intended_font(font: String) {
+    if let Some(m) = INTENDED_FONT.get() {
+        *m.lock() = font;
+    } else {
+        let _ = INTENDED_FONT.set(Mutex::new(font));
+    }
+}
 
 /// Initialize theme watching and actions
 pub fn init(cx: &mut App) {
@@ -57,8 +79,9 @@ pub fn init(cx: &mut App) {
     // Apply saved font family if present, otherwise use platform default
     use crate::config::terminal::FONT_FAMILY;
     let font_to_apply = saved_font.unwrap_or_else(|| FONT_FAMILY.to_string());
-    // Clone font for closure before moving into .into()
-    let font_for_closure = font_to_apply.clone();
+
+    // Store the intended font so we can restore it after apply_config calls
+    set_intended_font(font_to_apply.clone());
     Theme::global_mut(cx).font_family = font_to_apply.into();
 
     // Find and watch themes directory
@@ -66,9 +89,6 @@ pub fn init(cx: &mut App) {
         tracing::info!("Loading themes from: {:?}", themes_dir);
         let theme_for_closure = saved_theme.clone();
         if let Err(e) = ThemeRegistry::watch_dir(themes_dir, cx, move |cx| {
-            // Save our font before applying theme (apply_config resets it)
-            let our_font = font_for_closure.clone();
-
             // Apply saved theme when themes are loaded
             if let Some(theme) = ThemeRegistry::global(cx)
                 .themes()
@@ -85,11 +105,7 @@ pub fn init(cx: &mut App) {
                 Theme::global_mut(cx).apply_config(&theme);
                 tracing::info!("Applied default theme: Catppuccin Mocha");
             }
-
-            // Re-apply our font after theme loaded (theme reset it to .SystemUIFont)
-            tracing::info!("Re-applying font after theme load: {}", our_font);
-            Theme::global_mut(cx).font_family = our_font.clone().into();
-            tracing::info!("Font now set to: {}", Theme::global(cx).font_family);
+            // Font restoration now happens in the observer below
         }) {
             tracing::warn!("Failed to watch themes directory: {}", e);
         }
@@ -97,28 +113,36 @@ pub fn init(cx: &mut App) {
         tracing::warn!("Themes directory not found, using default theme");
     }
 
-    // Watch for theme changes and save (only if we have loaded themes)
+    // Watch for theme changes - restore font and save settings
     cx.observe_global::<Theme>(|cx| {
-        // Only save if themes have been loaded (otherwise we'd save "Default Dark")
-        let themes = ThemeRegistry::global(cx).themes();
-        if themes.is_empty() {
+        // Get all values we need first (immutable borrows)
+        let themes_empty = ThemeRegistry::global(cx).themes().is_empty();
+        if themes_empty {
             return;
         }
 
-        let theme_name = cx.theme().theme_name().to_string();
-        // Only save if the theme exists in our registry
-        if !themes.contains_key(&theme_name as &str) {
-            return;
+        let intended_font = get_intended_font();
+        let current_font = Theme::global(cx).font_family.to_string();
+        let theme_name = Theme::global(cx).theme_name().to_string();
+        let theme_in_registry = ThemeRegistry::global(cx)
+            .themes()
+            .contains_key(&theme_name as &str);
+
+        // If apply_config reset the font, restore our intended font
+        if current_font != intended_font {
+            tracing::info!("Restoring font: {} -> {}", current_font, intended_font);
+            Theme::global_mut(cx).font_family = intended_font.clone().into();
         }
 
-        let font_family = cx.theme().font_family.to_string();
-
-        // Preserve existing window bounds when saving theme/font
+        // Save settings
         let mut settings = load_settings();
-        // Log before moving into settings to avoid clone
-        tracing::debug!("Saved settings: theme={}, font={}", theme_name, font_family);
-        settings.theme = Some(theme_name);
-        settings.font_family = Some(font_family);
+
+        // Only update theme if it's a custom theme from our registry
+        if theme_in_registry {
+            settings.theme = Some(theme_name);
+        }
+
+        settings.font_family = Some(intended_font);
         save_settings(&settings);
     })
     .detach();
