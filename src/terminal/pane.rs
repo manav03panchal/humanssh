@@ -253,9 +253,10 @@ impl TerminalPane {
 
         cx.spawn(async move |this, cx| {
             // Adaptive polling intervals (in ms)
-            const ACTIVE_INTERVAL: u64 = 4; // Fast when data flowing (~250fps)
-            const IDLE_INTERVAL: u64 = 50; // Slow when idle
-            const IDLE_THRESHOLD: u32 = 5; // Cycles without data before going idle
+            // 16ms = 60fps which is smooth and works on weaker GPUs
+            const ACTIVE_INTERVAL: u64 = 16; // 60fps when data flowing
+            const IDLE_INTERVAL: u64 = 100; // Slow when idle (save power)
+            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
 
             let mut idle_count = 0u32;
 
@@ -377,9 +378,10 @@ impl TerminalPane {
         let pty_clone = pane.pty.clone();
 
         cx.spawn(async move |this, cx| {
-            const ACTIVE_INTERVAL: u64 = 4;
-            const IDLE_INTERVAL: u64 = 50;
-            const IDLE_THRESHOLD: u32 = 5;
+            // Same intervals as main terminal - 60fps is smooth enough
+            const ACTIVE_INTERVAL: u64 = 16;
+            const IDLE_INTERVAL: u64 = 100;
+            const IDLE_THRESHOLD: u32 = 3;
 
             let mut idle_count = 0u32;
 
@@ -924,8 +926,15 @@ impl TerminalPane {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
 
-        // === Platform (Cmd/Super) shortcuts - handled by the app, not sent to PTY ===
-        if mods.platform {
+        // === Platform shortcuts - handled by the app, not sent to PTY ===
+        // On macOS: Cmd key (mods.platform)
+        // On Windows/Linux: Ctrl key (mods.control) for common shortcuts
+        #[cfg(target_os = "macos")]
+        let is_command_key = mods.platform;
+        #[cfg(not(target_os = "macos"))]
+        let is_command_key = mods.control;
+
+        if is_command_key {
             if mods.shift {
                 match key {
                     "left" => {
@@ -946,8 +955,20 @@ impl TerminalPane {
                         return;
                     }
                     "c" => {
-                        self.copy_selection(cx);
-                        return;
+                        // On macOS, Cmd+C always copies (even if empty)
+                        // On Windows/Linux, Ctrl+C copies only if selection exists,
+                        // otherwise we need to send SIGINT (handled below)
+                        #[cfg(target_os = "macos")]
+                        {
+                            self.copy_selection(cx);
+                            return;
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        if self.get_selected_text().is_some() {
+                            self.copy_selection(cx);
+                            return;
+                        }
+                        // Fall through - Ctrl+C with no selection needs SIGINT
                     }
                     "v" => {
                         self.paste_clipboard(cx);
