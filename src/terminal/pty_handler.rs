@@ -41,15 +41,6 @@ const ALLOWED_SHELLS: &[&str] = &[
     "/run/current-system/sw/bin/fish",
 ];
 
-/// Allowed shell executables for security validation (Windows).
-/// These are executable names that will be resolved via PATH or System32.
-#[cfg(target_os = "windows")]
-const ALLOWED_SHELLS_WINDOWS: &[&str] = &[
-    "cmd.exe",
-    "powershell.exe",
-    "pwsh.exe", // PowerShell Core
-];
-
 /// Default shell to use when SHELL is invalid or unset (Unix).
 #[cfg(not(target_os = "windows"))]
 const DEFAULT_SHELL: &str = "/bin/zsh";
