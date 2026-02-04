@@ -36,7 +36,11 @@ pub struct SwitchDecorations(pub super::persistence::LinuxDecorations);
 pub fn register_actions(cx: &mut App) {
     cx.on_action(|action: &SwitchTheme, cx| {
         if let Some(theme_config) = ThemeRegistry::global(cx).themes().get(&action.0).cloned() {
+            // Preserve current font before applying theme (apply_config resets it to .SystemUIFont)
+            let current_font = Theme::global(cx).font_family.clone();
             Theme::global_mut(cx).apply_config(&theme_config);
+            // Re-apply the font after theme switch
+            Theme::global_mut(cx).font_family = current_font;
             tracing::info!("Switched to theme: {}", action.0);
         }
         cx.refresh_windows();
