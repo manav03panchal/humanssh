@@ -542,16 +542,23 @@ mod tests {
         }
 
         #[test]
-        fn test_popular_fonts_near_top() {
-            // Popular fonts should be in the first half of the list
-            let popular = ["JetBrains Mono", "Fira Code", "SF Mono"];
+        fn test_builtin_fonts_near_top() {
+            // Built-in platform fonts should be prioritized at the top
+            // These are guaranteed to exist on the system
+            #[cfg(target_os = "macos")]
+            let builtin = ["Menlo", "Monaco", "SF Mono", "Courier New"];
+            #[cfg(target_os = "windows")]
+            let builtin = ["Consolas", "Courier New", "Lucida Console"];
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            let builtin = ["monospace", "DejaVu Sans Mono"];
+
             let half = TERMINAL_FONTS.len() / 2;
 
-            for font in popular {
+            for font in builtin {
                 if let Some(pos) = TERMINAL_FONTS.iter().position(|&f| f == font) {
                     assert!(
                         pos <= half,
-                        "Popular font '{}' should be in first half of list (position {}, half is {})",
+                        "Built-in font '{}' should be in first half of list (position {}, half is {})",
                         font,
                         pos,
                         half
