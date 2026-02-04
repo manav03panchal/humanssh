@@ -78,12 +78,6 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
     let current_theme = cx.theme().theme_name().clone();
     // Use Theme::global directly to ensure we read from the same source that's modified
     let current_font = Theme::global(cx).font_family.to_string();
-    let cx_theme_font = cx.theme().font_family.to_string();
-    tracing::info!(
-        "Settings dialog: Theme::global font={}, cx.theme font={}",
-        current_font,
-        cx_theme_font
-    );
 
     v_flex()
         .gap_4()
