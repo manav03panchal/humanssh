@@ -19,6 +19,7 @@ use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
 use gpui::*;
+use gpui_component::ActiveTheme;
 use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
 
 // Terminal-specific actions to capture keys before GPUI's focus system
@@ -28,63 +29,93 @@ use std::fmt::Write as FmtWrite;
 use std::sync::Arc;
 
 // Import centralized configuration
+// FONT_FAMILY used in tests via super::*
+#[allow(unused_imports)]
 use crate::config::terminal::{
     DEFAULT_FONT_SIZE, FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, PADDING,
 };
 
 /// Cache for cell dimensions to avoid recalculating every frame.
-/// Key is font_size (as bits), value is (width, height).
-static CELL_DIMS_CACHE: Mutex<Option<(u32, f32, f32)>> = Mutex::new(None);
+/// Key is (font_size bits, font_family), value is (width, height).
+static CELL_DIMS_CACHE: Mutex<Option<(u32, SharedString, f32, f32)>> = Mutex::new(None);
 
 /// Calculate cell dimensions from actual font metrics (cached).
-fn get_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
+fn get_cell_dimensions(
+    window: &mut Window,
+    font_size: f32,
+    font_family: &SharedString,
+) -> (f32, f32) {
     let font_size_bits = font_size.to_bits();
 
-    // Fast path: return cached value if font size matches
+    // Fast path: return cached value if font size and family match
     {
         let cache = CELL_DIMS_CACHE.lock();
-        if let Some((cached_size, width, height)) = *cache {
-            if cached_size == font_size_bits {
+        if let Some((cached_size, ref cached_family, width, height)) = *cache {
+            if cached_size == font_size_bits && cached_family == font_family {
                 return (width, height);
             }
         }
     }
 
     // Slow path: calculate and cache
-    let (width, height) = calculate_cell_dimensions(window, font_size);
-    *CELL_DIMS_CACHE.lock() = Some((font_size_bits, width, height));
+    let (width, height) = calculate_cell_dimensions(window, font_size, font_family);
+    *CELL_DIMS_CACHE.lock() = Some((font_size_bits, font_family.clone(), width, height));
     (width, height)
 }
 
 /// Actually calculate cell dimensions from font metrics.
-fn calculate_cell_dimensions(window: &mut Window, font_size: f32) -> (f32, f32) {
+/// Uses the same shaping system as rendering for consistency.
+fn calculate_cell_dimensions(
+    window: &mut Window,
+    font_size: f32,
+    font_family: &SharedString,
+) -> (f32, f32) {
     let font = Font {
-        family: FONT_FAMILY.into(),
+        family: font_family.clone(),
         features: FontFeatures::default(),
         fallbacks: None,
         weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
     };
     let font_size_px = px(font_size);
+    let text_system = window.text_system();
 
-    // Measure a single character to get the cell width
-    let runs = vec![TextRun {
-        len: 1,
-        font: font.clone(),
-        color: black(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    }];
+    // Get font ID for metrics
+    let font_id = text_system.resolve_font(&font);
 
-    // Shape a single 'M' character (full-width in monospace)
-    let shaped = window
-        .text_system()
-        .shape_line("M".into(), font_size_px, &runs, None);
-    let cell_width = shaped.width.into();
+    // Cell width: Use GPUI's advance() for the actual glyph advance width
+    // This is the proper monospace cell width from font metrics
+    let cell_width: f32 = match text_system.advance(font_id, font_size_px, '0') {
+        Ok(size) => size.width.into(),
+        Err(_) => {
+            // Fallback: shape a character if advance fails
+            let run = TextRun {
+                len: 1,
+                font: font.clone(),
+                color: black(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = text_system.shape_line("0".into(), font_size_px, &[run], None);
+            shaped.width.into()
+        }
+    };
 
-    // Use ascent + descent + some line spacing for cell height
-    let cell_height = font_size * 1.2;
+    // Cell height = ascent + |descent| from proper font metrics
+    let ascent: f32 = text_system.ascent(font_id, font_size_px).into();
+    let descent: f32 = text_system.descent(font_id, font_size_px).into();
+    let cell_height = ascent + descent.abs();
+
+    tracing::debug!(
+        font = %font_family,
+        size = font_size,
+        cell_width = cell_width,
+        cell_height = cell_height,
+        ascent = ascent,
+        descent = descent,
+        "Cell dimensions calculated"
+    );
 
     (cell_width, cell_height)
 }
@@ -1514,14 +1545,17 @@ impl Render for TerminalPane {
             "Terminal render"
         );
         let bg_color = colors.background;
-        let font_family: SharedString = FONT_FAMILY.into();
+
+        // Get font family from theme (user-configurable) with fallback to default
+        let font_family: SharedString = cx.theme().font_family.clone();
 
         // Get current font size and calculate cell dimensions
         let current_font_size = display_state.font_size;
         drop(display_state); // Release read lock before write
 
-        // Calculate cell dimensions from actual font metrics
-        let (cell_width, cell_height) = get_cell_dimensions(window, current_font_size);
+        // Calculate cell dimensions from actual font metrics (includes font family in cache key)
+        let (cell_width, cell_height) =
+            get_cell_dimensions(window, current_font_size, &font_family);
         self.display.write().cell_dims = (cell_width, cell_height);
 
         // Clone data needed for canvas callbacks (resize happens in prepaint with actual bounds)

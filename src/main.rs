@@ -72,7 +72,8 @@ fn init_logging() {
     }
 }
 
-/// Build window options using saved bounds.
+/// Build window options using saved bounds (macOS/Windows).
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn build_window_options() -> WindowOptions {
     let saved = theme::load_window_bounds();
     WindowOptions {
@@ -83,11 +84,104 @@ fn build_window_options() -> WindowOptions {
                 height: px(saved.height),
             },
         })),
-        titlebar: Some(TitlebarOptions {
-            title: Some("HumanSSH".into()),
-            appears_transparent: true,
-            ..Default::default()
-        }),
+        titlebar: Some(build_titlebar_options()),
+        ..Default::default()
+    }
+}
+
+/// Build window options using saved bounds (Linux).
+/// Includes window_decorations setting for Wayland/X11 compositors.
+#[cfg(target_os = "linux")]
+fn build_window_options() -> WindowOptions {
+    use crate::theme::{load_linux_decorations, LinuxDecorations};
+
+    let saved = theme::load_window_bounds();
+    let decorations = load_linux_decorations();
+
+    // Map our setting to GPUI's WindowDecorations
+    let window_decorations = match decorations {
+        LinuxDecorations::Server => Some(WindowDecorations::Server),
+        LinuxDecorations::Client => Some(WindowDecorations::Client),
+    };
+
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: Point::new(px(saved.x), px(saved.y)),
+            size: Size {
+                width: px(saved.width),
+                height: px(saved.height),
+            },
+        })),
+        titlebar: Some(build_titlebar_options()),
+        window_decorations,
+        ..Default::default()
+    }
+}
+
+/// Build window options using saved bounds (other Unix).
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn build_window_options() -> WindowOptions {
+    let saved = theme::load_window_bounds();
+    WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(Bounds {
+            origin: Point::new(px(saved.x), px(saved.y)),
+            size: Size {
+                width: px(saved.width),
+                height: px(saved.height),
+            },
+        })),
+        titlebar: Some(build_titlebar_options()),
+        ..Default::default()
+    }
+}
+
+/// Build platform-specific titlebar options.
+/// macOS: transparent titlebar with traffic light buttons
+/// Windows: native titlebar with min/max/close buttons
+#[cfg(target_os = "macos")]
+fn build_titlebar_options() -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some("HumanSSH".into()),
+        appears_transparent: true,
+        ..Default::default()
+    }
+}
+
+/// Build platform-specific titlebar options.
+/// Windows: native titlebar with standard window chrome
+#[cfg(target_os = "windows")]
+fn build_titlebar_options() -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some("HumanSSH".into()),
+        // Use native Windows titlebar for proper min/max/close buttons
+        appears_transparent: false,
+        ..Default::default()
+    }
+}
+
+/// Build platform-specific titlebar options.
+/// Linux: configurable based on user preference (Server = native, Client = custom)
+#[cfg(target_os = "linux")]
+fn build_titlebar_options() -> TitlebarOptions {
+    use crate::theme::{load_linux_decorations, LinuxDecorations};
+
+    let decorations = load_linux_decorations();
+    let appears_transparent = matches!(decorations, LinuxDecorations::Client);
+
+    TitlebarOptions {
+        title: Some("HumanSSH".into()),
+        appears_transparent,
+        ..Default::default()
+    }
+}
+
+/// Build platform-specific titlebar options.
+/// Other Unix (FreeBSD, etc.): native titlebar
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn build_titlebar_options() -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some("HumanSSH".into()),
+        appears_transparent: false,
         ..Default::default()
     }
 }

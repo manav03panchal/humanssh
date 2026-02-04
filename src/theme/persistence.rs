@@ -62,12 +62,78 @@ impl WindowBoundsConfig {
     }
 }
 
+/// Available shell options for Windows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum WindowsShell {
+    /// Windows PowerShell (powershell.exe) - default
+    #[default]
+    PowerShell,
+    /// PowerShell Core (pwsh.exe) - cross-platform PowerShell
+    PowerShellCore,
+    /// Command Prompt (cmd.exe) - legacy Windows shell
+    Cmd,
+}
+
+impl WindowsShell {
+    /// Get the display name for this shell.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            WindowsShell::PowerShell => "PowerShell",
+            WindowsShell::PowerShellCore => "PowerShell Core (pwsh)",
+            WindowsShell::Cmd => "Command Prompt (cmd)",
+        }
+    }
+
+    /// Get all available shell options.
+    pub fn all() -> &'static [WindowsShell] {
+        &[
+            WindowsShell::PowerShell,
+            WindowsShell::PowerShellCore,
+            WindowsShell::Cmd,
+        ]
+    }
+}
+
+/// Window decoration style for Linux.
+/// Controls whether the app or the window manager draws the titlebar.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum LinuxDecorations {
+    /// Server-side decorations - window manager draws the titlebar (GTK/GNOME style).
+    /// Best for GNOME, KDE, and most desktop environments.
+    #[default]
+    Server,
+    /// Client-side decorations - app draws its own titlebar.
+    /// Note: Not supported by GNOME Wayland, may have issues on some compositors.
+    Client,
+}
+
+impl LinuxDecorations {
+    /// Get the display name for this decoration style.
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            LinuxDecorations::Server => "System (Recommended)",
+            LinuxDecorations::Client => "Custom (App-drawn)",
+        }
+    }
+
+    /// Get all available decoration options.
+    pub fn all() -> &'static [LinuxDecorations] {
+        &[LinuxDecorations::Server, LinuxDecorations::Client]
+    }
+}
+
 /// Settings that persist across sessions
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub theme: Option<String>,
     pub font_family: Option<String>,
     pub window_bounds: Option<WindowBoundsConfig>,
+    /// Shell preference (Windows only)
+    #[serde(default)]
+    pub windows_shell: Option<WindowsShell>,
+    /// Window decoration style (Linux only)
+    #[serde(default)]
+    pub linux_decorations: Option<LinuxDecorations>,
 }
 
 impl Settings {
@@ -200,6 +266,34 @@ pub fn load_window_bounds() -> WindowBoundsConfig {
 pub fn save_window_bounds(bounds: WindowBoundsConfig) {
     let mut settings = load_settings();
     settings.window_bounds = Some(bounds);
+    save_settings(&settings);
+}
+
+/// Load Windows shell preference (public API for pty_handler)
+#[cfg(target_os = "windows")]
+pub fn load_windows_shell() -> WindowsShell {
+    load_settings().windows_shell.unwrap_or_default()
+}
+
+/// Save Windows shell preference
+#[cfg(target_os = "windows")]
+pub fn save_windows_shell(shell: WindowsShell) {
+    let mut settings = load_settings();
+    settings.windows_shell = Some(shell);
+    save_settings(&settings);
+}
+
+/// Load Linux decoration preference (public API for main.rs)
+#[cfg(target_os = "linux")]
+pub fn load_linux_decorations() -> LinuxDecorations {
+    load_settings().linux_decorations.unwrap_or_default()
+}
+
+/// Save Linux decoration preference
+#[cfg(target_os = "linux")]
+pub fn save_linux_decorations(decorations: LinuxDecorations) {
+    let mut settings = load_settings();
+    settings.linux_decorations = Some(decorations);
     save_settings(&settings);
 }
 
@@ -399,6 +493,7 @@ mod tests {
                 theme: Some(long_name),
                 font_family: None,
                 window_bounds: None,
+                ..Default::default()
             };
             settings.validate();
             assert!(
@@ -414,6 +509,7 @@ mod tests {
                 theme: None,
                 font_family: Some(long_name),
                 window_bounds: None,
+                ..Default::default()
             };
             settings.validate();
             assert!(
@@ -429,6 +525,7 @@ mod tests {
                 theme: Some(valid_name.clone()),
                 font_family: None,
                 window_bounds: None,
+                ..Default::default()
             };
             settings.validate();
             assert_eq!(settings.theme, Some(valid_name));
@@ -441,6 +538,7 @@ mod tests {
                 theme: Some(max_name.clone()),
                 font_family: Some(max_name.clone()),
                 window_bounds: None,
+                ..Default::default()
             };
             settings.validate();
             assert_eq!(settings.theme, Some(max_name.clone()));
@@ -458,6 +556,7 @@ mod tests {
                     width: 800.0,
                     height: 600.0,
                 }),
+                ..Default::default()
             };
             settings.validate();
             let bounds = settings.window_bounds.unwrap();
@@ -471,6 +570,7 @@ mod tests {
                 theme: Some("Test Theme".to_string()),
                 font_family: Some("Monospace".to_string()),
                 window_bounds: Some(WindowBoundsConfig::default()),
+                ..Default::default()
             };
             let cloned = original.clone();
             assert_eq!(original.theme, cloned.theme);
@@ -487,6 +587,7 @@ mod tests {
                 theme: Some("Catppuccin Mocha".to_string()),
                 font_family: Some("Iosevka".to_string()),
                 window_bounds: Some(WindowBoundsConfig::default()),
+                ..Default::default()
             };
             let json = serde_json::to_string(&settings).unwrap();
             assert!(json.contains("Catppuccin Mocha"));
@@ -557,6 +658,7 @@ mod tests {
                     width: 1600.0,
                     height: 900.0,
                 }),
+                ..Default::default()
             };
             let json = serde_json::to_string_pretty(&original).unwrap();
             let restored: Settings = serde_json::from_str(&json).unwrap();
@@ -590,6 +692,7 @@ mod tests {
                     width: 1200.0,
                     height: 800.0,
                 }),
+                ..Default::default()
             };
 
             // Save manually (since we can't easily override settings_path())
@@ -756,6 +859,7 @@ mod tests {
                 theme: Some("".to_string()),
                 font_family: None,
                 window_bounds: None,
+                ..Default::default()
             };
             settings.validate();
             // Empty string is within length limit, so it's preserved
@@ -768,6 +872,7 @@ mod tests {
                 theme: Some("テーマ 日本語".to_string()),
                 font_family: Some("フォント".to_string()),
                 window_bounds: None,
+                ..Default::default()
             };
             settings.validate();
             // Unicode strings within length limit are preserved
@@ -781,6 +886,7 @@ mod tests {
                 theme: Some("Theme with spaces & symbols!@#$%".to_string()),
                 font_family: None,
                 window_bounds: None,
+                ..Default::default()
             };
             settings.validate();
             assert_eq!(

@@ -120,57 +120,74 @@ fn get_validated_shell() -> String {
 }
 
 /// Get a validated shell path from the environment (Windows).
-/// Uses COMSPEC or falls back to PowerShell.
+/// Uses saved preference, then falls back to PowerShell.
 #[cfg(target_os = "windows")]
 fn get_validated_shell() -> String {
-    // Try COMSPEC first (typically cmd.exe)
-    if let Ok(comspec) = std::env::var("COMSPEC") {
-        let shell_name = Path::new(&comspec)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+    use crate::theme::{load_windows_shell, WindowsShell};
 
-        if ALLOWED_SHELLS_WINDOWS
-            .iter()
-            .any(|&allowed| shell_name == allowed.to_lowercase())
-            && Path::new(&comspec).exists()
-        {
-            tracing::debug!("Using COMSPEC shell: {}", comspec);
-            return comspec;
-        }
-    }
+    let preferred = load_windows_shell();
+    tracing::debug!("User preferred shell: {:?}", preferred);
 
-    // Try to find PowerShell (preferred default on Windows)
     if let Ok(system_root) = std::env::var("SystemRoot") {
-        // Try PowerShell Core (pwsh) first via PATH
-        if let Ok(output) = std::process::Command::new("where").arg("pwsh.exe").output() {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout);
-                if let Some(first_line) = path.lines().next() {
-                    let pwsh_path = first_line.trim();
-                    if Path::new(pwsh_path).exists() {
-                        tracing::debug!("Using PowerShell Core: {}", pwsh_path);
-                        return pwsh_path.to_string();
+        match preferred {
+            WindowsShell::PowerShellCore => {
+                // Try PowerShell Core (pwsh) via PATH
+                if let Ok(output) = std::process::Command::new("where").arg("pwsh.exe").output() {
+                    if output.status.success() {
+                        let path = String::from_utf8_lossy(&output.stdout);
+                        if let Some(first_line) = path.lines().next() {
+                            let pwsh_path = first_line.trim();
+                            if Path::new(pwsh_path).exists() {
+                                tracing::debug!("Using PowerShell Core: {}", pwsh_path);
+                                return pwsh_path.to_string();
+                            }
+                        }
                     }
+                }
+                // Fall back to regular PowerShell if pwsh not found
+                tracing::warn!("PowerShell Core (pwsh) not found, falling back to PowerShell");
+                let powershell_path = format!(
+                    "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                    system_root
+                );
+                if Path::new(&powershell_path).exists() {
+                    return powershell_path;
+                }
+            }
+            WindowsShell::PowerShell => {
+                // Windows PowerShell
+                let powershell_path = format!(
+                    "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+                    system_root
+                );
+                if Path::new(&powershell_path).exists() {
+                    tracing::debug!("Using Windows PowerShell: {}", powershell_path);
+                    return powershell_path;
+                }
+            }
+            WindowsShell::Cmd => {
+                // Command Prompt
+                let cmd_path = format!("{}\\System32\\cmd.exe", system_root);
+                if Path::new(&cmd_path).exists() {
+                    tracing::debug!("Using cmd.exe: {}", cmd_path);
+                    return cmd_path;
                 }
             }
         }
 
-        // Fall back to Windows PowerShell
+        // Fallback chain if preferred shell not found
         let powershell_path = format!(
             "{}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
             system_root
         );
         if Path::new(&powershell_path).exists() {
-            tracing::debug!("Using Windows PowerShell: {}", powershell_path);
+            tracing::debug!("Fallback to Windows PowerShell: {}", powershell_path);
             return powershell_path;
         }
 
-        // Last resort: cmd.exe
         let cmd_path = format!("{}\\System32\\cmd.exe", system_root);
         if Path::new(&cmd_path).exists() {
-            tracing::debug!("Using cmd.exe: {}", cmd_path);
+            tracing::debug!("Fallback to cmd.exe: {}", cmd_path);
             return cmd_path;
         }
     }

@@ -2,6 +2,10 @@
 //!
 //! Extracted from workspace.rs to reduce module size and separate concerns.
 
+#[cfg(target_os = "linux")]
+use crate::theme::{load_linux_decorations, LinuxDecorations, SwitchDecorations};
+#[cfg(target_os = "windows")]
+use crate::theme::{load_windows_shell, SwitchShell, WindowsShell};
 use crate::theme::{SwitchFont, SwitchTheme};
 use gpui::{div, px, App, IntoElement, ParentElement, SharedString, Styled, Window};
 use gpui_component::button::Button;
@@ -9,18 +13,48 @@ use gpui_component::menu::DropdownMenu;
 use gpui_component::theme::ThemeRegistry;
 use gpui_component::{v_flex, ActiveTheme, StyledExt, WindowExt};
 
-/// Common monospace fonts for terminals.
+/// Common monospace fonts for terminals (macOS).
+/// Built-in fonts first (guaranteed to exist), then popular installable fonts.
+#[cfg(target_os = "macos")]
 const TERMINAL_FONTS: &[&str] = &[
-    "Iosevka Nerd Font",
+    "Menlo",       // Built-in since macOS 10.6 (DEFAULT)
+    "Monaco",      // Built-in (legacy)
+    "SF Mono",     // Built-in on newer macOS
+    "Courier New", // Built-in
     "JetBrains Mono",
     "Fira Code",
-    "SF Mono",
-    "Monaco",
-    "Menlo",
+    "Iosevka Nerd Font",
     "Source Code Pro",
     "Cascadia Code",
-    "Consolas",
-    "Ubuntu Mono",
+];
+
+/// Common monospace fonts for terminals (Windows).
+/// Built-in fonts first (guaranteed to exist), then popular installable fonts.
+#[cfg(target_os = "windows")]
+const TERMINAL_FONTS: &[&str] = &[
+    "Consolas",       // Built-in since Vista (DEFAULT)
+    "Courier New",    // Built-in
+    "Lucida Console", // Built-in
+    "Cascadia Code",  // Built-in with Windows Terminal
+    "Cascadia Mono",
+    "JetBrains Mono",
+    "Fira Code",
+    "Source Code Pro",
+    "Iosevka Nerd Font",
+];
+
+/// Common monospace fonts for terminals (Linux and others).
+/// Generic "monospace" first (always resolves), then common fonts.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const TERMINAL_FONTS: &[&str] = &[
+    "monospace",        // Generic, always resolves (DEFAULT)
+    "DejaVu Sans Mono", // Very common on Linux
+    "Liberation Mono",  // Common on RHEL/Fedora
+    "Ubuntu Mono",      // Ubuntu default
+    "JetBrains Mono",
+    "Fira Code",
+    "Source Code Pro",
+    "Iosevka Nerd Font",
 ];
 
 /// Toggle the settings dialog (open if closed, close if open).
@@ -38,7 +72,8 @@ pub fn toggle_settings_dialog(window: &mut Window, cx: &mut App) {
     });
 }
 
-/// Render the settings dialog content.
+/// Render the settings dialog content (macOS version).
+#[cfg(target_os = "macos")]
 pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
     let current_theme = cx.theme().theme_name().clone();
     let current_font = cx.theme().font_family.to_string();
@@ -116,6 +151,232 @@ pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoE
                 .text_xs()
                 .text_color(cx.theme().muted_foreground)
                 .child("Press Cmd+, to close"),
+        )
+}
+
+/// Render the settings dialog content (Windows version with shell selection).
+#[cfg(target_os = "windows")]
+pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
+    let current_theme = cx.theme().theme_name().clone();
+    let current_font = cx.theme().font_family.to_string();
+    let current_shell = load_windows_shell();
+
+    v_flex()
+        .gap_4()
+        // Theme selection dropdown
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Theme"),
+                )
+                .child(
+                    Button::new("theme-dropdown")
+                        .label(current_theme.clone())
+                        .outline()
+                        .w_full()
+                        .dropdown_menu(move |menu, _, cx| {
+                            let themes = ThemeRegistry::global(cx).sorted_themes();
+                            let current = cx.theme().theme_name().clone();
+                            let mut menu = menu.min_w(px(200.0));
+                            for theme in themes {
+                                let name = theme.name.clone();
+                                let is_current = current == name;
+                                menu = menu.menu_with_check(
+                                    name.clone(),
+                                    is_current,
+                                    Box::new(SwitchTheme(name)),
+                                );
+                            }
+                            menu
+                        }),
+                ),
+        )
+        // Font family selection dropdown
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Terminal Font"),
+                )
+                .child(
+                    Button::new("font-dropdown")
+                        .label(current_font.clone())
+                        .outline()
+                        .w_full()
+                        .dropdown_menu(move |menu, _, cx| {
+                            let current = cx.theme().font_family.to_string();
+                            let mut menu = menu.min_w(px(200.0));
+                            for font in TERMINAL_FONTS {
+                                let is_current = current == *font;
+                                let font_name: SharedString = (*font).into();
+                                menu = menu.menu_with_check(
+                                    *font,
+                                    is_current,
+                                    Box::new(SwitchFont(font_name)),
+                                );
+                            }
+                            menu
+                        }),
+                ),
+        )
+        // Shell selection dropdown (Windows only)
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Default Shell"),
+                )
+                .child(
+                    Button::new("shell-dropdown")
+                        .label(current_shell.display_name())
+                        .outline()
+                        .w_full()
+                        .dropdown_menu(move |menu, _, _cx| {
+                            let mut menu = menu.min_w(px(200.0));
+                            for shell in WindowsShell::all() {
+                                let is_current = current_shell == *shell;
+                                menu = menu.menu_with_check(
+                                    shell.display_name(),
+                                    is_current,
+                                    Box::new(SwitchShell(shell.clone())),
+                                );
+                            }
+                            menu
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .pt_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Press Ctrl+, to close (changes apply to new terminals)"),
+        )
+}
+
+/// Render the settings dialog content (Linux version with decoration selection).
+#[cfg(target_os = "linux")]
+pub fn render_settings_content(_window: &mut Window, cx: &mut App) -> impl IntoElement {
+    let current_theme = cx.theme().theme_name().clone();
+    let current_font = cx.theme().font_family.to_string();
+    let current_decorations = load_linux_decorations();
+
+    v_flex()
+        .gap_4()
+        // Theme selection dropdown
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Theme"),
+                )
+                .child(
+                    Button::new("theme-dropdown")
+                        .label(current_theme.clone())
+                        .outline()
+                        .w_full()
+                        .dropdown_menu(move |menu, _, cx| {
+                            let themes = ThemeRegistry::global(cx).sorted_themes();
+                            let current = cx.theme().theme_name().clone();
+                            let mut menu = menu.min_w(px(200.0));
+                            for theme in themes {
+                                let name = theme.name.clone();
+                                let is_current = current == name;
+                                menu = menu.menu_with_check(
+                                    name.clone(),
+                                    is_current,
+                                    Box::new(SwitchTheme(name)),
+                                );
+                            }
+                            menu
+                        }),
+                ),
+        )
+        // Font family selection dropdown
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Terminal Font"),
+                )
+                .child(
+                    Button::new("font-dropdown")
+                        .label(current_font.clone())
+                        .outline()
+                        .w_full()
+                        .dropdown_menu(move |menu, _, cx| {
+                            let current = cx.theme().font_family.to_string();
+                            let mut menu = menu.min_w(px(200.0));
+                            for font in TERMINAL_FONTS {
+                                let is_current = current == *font;
+                                let font_name: SharedString = (*font).into();
+                                menu = menu.menu_with_check(
+                                    *font,
+                                    is_current,
+                                    Box::new(SwitchFont(font_name)),
+                                );
+                            }
+                            menu
+                        }),
+                ),
+        )
+        // Window decorations dropdown (Linux only)
+        .child(
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .font_semibold()
+                        .text_color(cx.theme().muted_foreground)
+                        .child("Window Decorations"),
+                )
+                .child(
+                    Button::new("decorations-dropdown")
+                        .label(current_decorations.display_name())
+                        .outline()
+                        .w_full()
+                        .dropdown_menu(move |menu, _, _cx| {
+                            let mut menu = menu.min_w(px(200.0));
+                            for dec in LinuxDecorations::all() {
+                                let is_current = current_decorations == *dec;
+                                menu = menu.menu_with_check(
+                                    dec.display_name(),
+                                    is_current,
+                                    Box::new(SwitchDecorations(dec.clone())),
+                                );
+                            }
+                            menu
+                        }),
+                ),
+        )
+        .child(
+            div()
+                .pt_2()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child("Press Ctrl+, to close (decoration changes require restart)"),
         )
 }
 

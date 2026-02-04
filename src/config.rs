@@ -11,8 +11,22 @@ pub mod terminal {
     pub const MIN_FONT_SIZE: f32 = 8.0;
     /// Maximum allowed font size.
     pub const MAX_FONT_SIZE: f32 = 32.0;
-    /// Default monospace font family.
-    pub const FONT_FAMILY: &str = "Iosevka Nerd Font";
+
+    /// Default monospace font family (macOS).
+    /// Menlo is built-in on all macOS versions since 10.6.
+    #[cfg(target_os = "macos")]
+    pub const FONT_FAMILY: &str = "Menlo";
+
+    /// Default monospace font family (Windows).
+    /// Consolas is built-in on all Windows versions since Vista.
+    #[cfg(target_os = "windows")]
+    pub const FONT_FAMILY: &str = "Consolas";
+
+    /// Default monospace font family (Linux and others).
+    /// "monospace" is the generic font family that always resolves to something.
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    pub const FONT_FAMILY: &str = "monospace";
+
     /// Padding around terminal content.
     pub const PADDING: f32 = 2.0;
     /// Cursor/border thickness in pixels.
@@ -23,8 +37,15 @@ pub mod terminal {
 pub mod tab_bar {
     /// Tab bar height in pixels.
     pub const HEIGHT: f32 = 38.0;
-    /// Left padding for traffic light buttons.
+
+    /// Left padding for traffic light buttons (macOS).
+    #[cfg(target_os = "macos")]
     pub const LEFT_PADDING: f32 = 78.0;
+
+    /// Left padding (Windows/Linux - no traffic lights).
+    #[cfg(not(target_os = "macos"))]
+    pub const LEFT_PADDING: f32 = 8.0;
+
     /// Right padding.
     pub const RIGHT_PADDING: f32 = 8.0;
     /// Minimum tab width.
