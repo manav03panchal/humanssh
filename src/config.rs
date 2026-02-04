@@ -95,7 +95,7 @@ pub mod timing {
     /// Tab title cache TTL.
     pub const TITLE_CACHE_TTL: Duration = Duration::from_millis(200);
     /// PTY polling interval.
-    pub const PTY_POLL_INTERVAL: Duration = Duration::from_millis(16);
+    pub const PTY_POLL_INTERVAL: Duration = Duration::from_millis(8);
 }
 
 /// Settings file validation limits.
