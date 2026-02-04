@@ -253,9 +253,10 @@ impl TerminalPane {
 
         cx.spawn(async move |this, cx| {
             // Adaptive polling intervals (in ms)
-            const ACTIVE_INTERVAL: u64 = 4; // Fast when data flowing (~250fps)
-            const IDLE_INTERVAL: u64 = 50; // Slow when idle
-            const IDLE_THRESHOLD: u32 = 5; // Cycles without data before going idle
+            // 16ms = 60fps which is smooth and works on weaker GPUs
+            const ACTIVE_INTERVAL: u64 = 16; // 60fps when data flowing
+            const IDLE_INTERVAL: u64 = 100; // Slow when idle (save power)
+            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
 
             let mut idle_count = 0u32;
 
@@ -377,9 +378,10 @@ impl TerminalPane {
         let pty_clone = pane.pty.clone();
 
         cx.spawn(async move |this, cx| {
-            const ACTIVE_INTERVAL: u64 = 4;
-            const IDLE_INTERVAL: u64 = 50;
-            const IDLE_THRESHOLD: u32 = 5;
+            // Same intervals as main terminal - 60fps is smooth enough
+            const ACTIVE_INTERVAL: u64 = 16;
+            const IDLE_INTERVAL: u64 = 100;
+            const IDLE_THRESHOLD: u32 = 3;
 
             let mut idle_count = 0u32;
 
