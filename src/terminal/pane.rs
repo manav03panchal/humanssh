@@ -924,8 +924,15 @@ impl TerminalPane {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
 
-        // === Platform (Cmd/Super) shortcuts - handled by the app, not sent to PTY ===
-        if mods.platform {
+        // === Platform shortcuts - handled by the app, not sent to PTY ===
+        // On macOS: Cmd key (mods.platform)
+        // On Windows/Linux: Ctrl key (mods.control) for common shortcuts
+        #[cfg(target_os = "macos")]
+        let is_command_key = mods.platform;
+        #[cfg(not(target_os = "macos"))]
+        let is_command_key = mods.control;
+
+        if is_command_key {
             if mods.shift {
                 match key {
                     "left" => {
@@ -946,8 +953,20 @@ impl TerminalPane {
                         return;
                     }
                     "c" => {
-                        self.copy_selection(cx);
-                        return;
+                        // On macOS, Cmd+C always copies (even if empty)
+                        // On Windows/Linux, Ctrl+C copies only if selection exists,
+                        // otherwise we need to send SIGINT (handled below)
+                        #[cfg(target_os = "macos")]
+                        {
+                            self.copy_selection(cx);
+                            return;
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        if self.get_selected_text().is_some() {
+                            self.copy_selection(cx);
+                            return;
+                        }
+                        // Fall through - Ctrl+C with no selection needs SIGINT
                     }
                     "v" => {
                         self.paste_clipboard(cx);
