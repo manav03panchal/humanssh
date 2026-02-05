@@ -9,7 +9,7 @@
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::vte::ansi::CursorShape;
-use gpui::Hsla;
+use gpui::{Hsla, SharedString};
 use std::fmt::Write as FmtWrite;
 
 use crate::config::terminal::DEFAULT_FONT_SIZE;
@@ -57,6 +57,8 @@ pub struct DisplayState {
     pub bounds: Option<gpui::Bounds<gpui::Pixels>>,
     /// Current font size
     pub font_size: f32,
+    /// Font size (as bits) and family used for the cached cell_dims, to detect when recalculation is needed
+    pub cached_font_key: Option<(u32, SharedString)>,
 }
 
 impl Default for DisplayState {
@@ -66,6 +68,7 @@ impl Default for DisplayState {
             cell_dims: (8.4, 17.0),
             bounds: None,
             font_size: DEFAULT_FONT_SIZE,
+            cached_font_key: None,
         }
     }
 }
@@ -279,6 +282,7 @@ mod tests {
             cell_dims: (10.0, 20.0),
             bounds: None,
             font_size: 16.0,
+            cached_font_key: None,
         };
         let cloned = state.clone();
         assert_eq!(state.size.cols, cloned.size.cols);
@@ -831,6 +835,7 @@ mod tests {
             cell_dims: (9.0, 18.0),
             bounds: None,
             font_size: 12.0,
+            cached_font_key: None,
         };
 
         assert_eq!(state.size.cols, 132);
@@ -1149,6 +1154,7 @@ mod tests {
             cell_dims: (0.0, 0.0),
             bounds: None,
             font_size: 14.0,
+            cached_font_key: None,
         };
         assert_eq!(state.cell_dims.0, 0.0);
         assert_eq!(state.cell_dims.1, 0.0);
@@ -1161,6 +1167,7 @@ mod tests {
             cell_dims: (f32::MAX, f32::MAX),
             bounds: None,
             font_size: 14.0,
+            cached_font_key: None,
         };
         assert_eq!(state.cell_dims.0, f32::MAX);
         assert_eq!(state.cell_dims.1, f32::MAX);
@@ -1173,6 +1180,7 @@ mod tests {
             cell_dims: (f32::INFINITY, f32::INFINITY),
             bounds: None,
             font_size: 14.0,
+            cached_font_key: None,
         };
         assert!(state.cell_dims.0.is_infinite());
         assert!(state.cell_dims.1.is_infinite());
@@ -1185,6 +1193,7 @@ mod tests {
             cell_dims: (f32::NAN, f32::NAN),
             bounds: None,
             font_size: 14.0,
+            cached_font_key: None,
         };
         assert!(state.cell_dims.0.is_nan());
         assert!(state.cell_dims.1.is_nan());
@@ -1201,6 +1210,7 @@ mod tests {
             cell_dims: (8.0, 16.0),
             bounds: None,
             font_size,
+            cached_font_key: None,
         };
         assert_eq!(state.font_size, font_size);
     }
@@ -1703,6 +1713,7 @@ mod tests {
                 cell_dims: (cell_w, cell_h),
                 bounds: None,
                 font_size,
+                cached_font_key: None,
             };
 
             prop_assert_eq!(state.size.cols, cols);
@@ -1724,6 +1735,7 @@ mod tests {
                 cell_dims: (10.0, 20.0),
                 bounds: None,
                 font_size,
+                cached_font_key: None,
             };
             let cloned = original.clone();
 

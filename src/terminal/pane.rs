@@ -35,32 +35,16 @@ use crate::config::terminal::{
     DEFAULT_FONT_SIZE, FONT_FAMILY, MAX_FONT_SIZE, MIN_FONT_SIZE, PADDING,
 };
 
-/// Cache for cell dimensions to avoid recalculating every frame.
-/// Key is (font_size bits, font_family), value is (width, height).
-static CELL_DIMS_CACHE: Mutex<Option<(u32, SharedString, f32, f32)>> = Mutex::new(None);
+// Cell dimension caching is handled per-instance in DisplayState.cached_font_key
 
-/// Calculate cell dimensions from actual font metrics (cached).
-fn get_cell_dimensions(
-    window: &mut Window,
-    font_size: f32,
-    font_family: &SharedString,
-) -> (f32, f32) {
-    let font_size_bits = font_size.to_bits();
-
-    // Fast path: return cached value if font size and family match
-    {
-        let cache = CELL_DIMS_CACHE.lock();
-        if let Some((cached_size, ref cached_family, width, height)) = *cache {
-            if cached_size == font_size_bits && cached_family == font_family {
-                return (width, height);
-            }
-        }
-    }
-
-    // Slow path: calculate and cache
-    let (width, height) = calculate_cell_dimensions(window, font_size, font_family);
-    *CELL_DIMS_CACHE.lock() = Some((font_size_bits, font_family.clone(), width, height));
-    (width, height)
+/// Font features enabling ligatures for fonts that support them (e.g., Fira Code, JetBrains Mono).
+/// Enables standard ligatures (liga), contextual alternates (calt), and contextual ligatures (clig).
+fn ligature_features() -> FontFeatures {
+    FontFeatures(Arc::new(vec![
+        ("liga".into(), 1),
+        ("calt".into(), 1),
+        ("clig".into(), 1),
+    ]))
 }
 
 /// Actually calculate cell dimensions from font metrics.
@@ -72,7 +56,7 @@ fn calculate_cell_dimensions(
 ) -> (f32, f32) {
     let font = Font {
         family: font_family.clone(),
-        features: FontFeatures::default(),
+        features: ligature_features(),
         fallbacks: None,
         weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
@@ -244,80 +228,7 @@ impl TerminalPane {
             processor.advance(&mut *term, error_msg.as_bytes());
         }
 
-        // Start event-driven PTY output processing with adaptive polling.
-        // Uses short intervals when data is flowing, longer intervals when idle.
-        // This reduces CPU usage from constant 16ms polling to near-zero when idle.
-        let term_clone = pane.term.clone();
-        let processor_clone = pane.processor.clone();
-        let pty_clone = pane.pty.clone();
-
-        cx.spawn(async move |this, cx| {
-            // Adaptive polling intervals (in ms)
-            // 8ms = 125fps for smooth terminal output
-            const ACTIVE_INTERVAL: u64 = 8; // 125fps when data flowing
-            const IDLE_INTERVAL: u64 = 100; // Slow when idle (save power)
-            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
-
-            let mut idle_count = 0u32;
-
-            loop {
-                // Choose interval based on recent activity
-                let interval = if idle_count >= IDLE_THRESHOLD {
-                    IDLE_INTERVAL
-                } else {
-                    ACTIVE_INTERVAL
-                };
-
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(interval))
-                    .await;
-
-                let (should_notify, has_data, is_exited) = {
-                    let pty_guard = pty_clone.lock();
-                    if let Some(ref pty) = *pty_guard {
-                        let is_exited = pty.has_exited();
-                        let output_chunks = pty.read_output();
-                        drop(pty_guard);
-                        if !output_chunks.is_empty() {
-                            let mut term = term_clone.lock();
-                            let mut processor = processor_clone.lock();
-                            for chunk in output_chunks {
-                                processor.advance(&mut *term, &chunk);
-                            }
-                            (true, true, is_exited)
-                        } else {
-                            (is_exited, false, is_exited) // Notify on exit too
-                        }
-                    } else {
-                        (true, false, true) // PTY is None, consider it exited
-                    }
-                };
-
-                // Update idle tracking
-                if has_data {
-                    idle_count = 0; // Reset on data
-                } else {
-                    idle_count = idle_count.saturating_add(1);
-                }
-
-                if should_notify {
-                    let _ = this.update(cx, |_, cx| cx.notify());
-                }
-
-                // Check if process exited and emit event
-                if is_exited {
-                    let _ = this.update(cx, |pane, cx| {
-                        if !pane.exit_emitted {
-                            pane.exit_emitted = true;
-                            cx.emit(TerminalExitEvent);
-                        }
-                    });
-                    break; // Stop polling after exit
-                }
-            }
-        })
-        .detach();
-
+        pane.start_pty_polling(cx);
         pane
     }
 
@@ -372,16 +283,24 @@ impl TerminalPane {
             processor.advance(&mut *term, error_msg.as_bytes());
         }
 
-        // Start PTY output processing
-        let term_clone = pane.term.clone();
-        let processor_clone = pane.processor.clone();
-        let pty_clone = pane.pty.clone();
+        pane.start_pty_polling(cx);
+        pane
+    }
+
+    /// Start adaptive PTY output polling.
+    ///
+    /// Uses short intervals (8ms / 125fps) when data is flowing, longer intervals
+    /// (100ms) when idle. This reduces CPU usage to near-zero when idle while
+    /// maintaining smooth output during activity.
+    fn start_pty_polling(&self, cx: &mut Context<Self>) {
+        let term_clone = self.term.clone();
+        let processor_clone = self.processor.clone();
+        let pty_clone = self.pty.clone();
 
         cx.spawn(async move |this, cx| {
-            // Same intervals as main terminal - 125fps for smoothness
-            const ACTIVE_INTERVAL: u64 = 8;
-            const IDLE_INTERVAL: u64 = 100;
-            const IDLE_THRESHOLD: u32 = 3;
+            const ACTIVE_INTERVAL: u64 = 8; // 125fps when data flowing
+            const IDLE_INTERVAL: u64 = 100; // Slow when idle (save power)
+            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
 
             let mut idle_count = 0u32;
 
@@ -400,14 +319,12 @@ impl TerminalPane {
                     let pty_guard = pty_clone.lock();
                     if let Some(ref pty) = *pty_guard {
                         let is_exited = pty.has_exited();
-                        let output_chunks = pty.read_output();
+                        let output = pty.read_output();
                         drop(pty_guard);
-                        if !output_chunks.is_empty() {
+                        if !output.is_empty() {
                             let mut term = term_clone.lock();
                             let mut processor = processor_clone.lock();
-                            for chunk in output_chunks {
-                                processor.advance(&mut *term, &chunk);
-                            }
+                            processor.advance(&mut *term, &output);
                             (true, true, is_exited)
                         } else {
                             (is_exited, false, is_exited)
@@ -439,17 +356,21 @@ impl TerminalPane {
             }
         })
         .detach();
-
-        pane
     }
 
-    /// Send keyboard input to the PTY
+    /// Send keyboard input to the PTY.
+    ///
+    /// If the write fails (e.g., broken pipe because the process exited),
+    /// the PTY handler is dropped so subsequent operations treat it as exited.
     pub fn send_input(&mut self, input: &str) {
         let mut pty_guard = self.pty.lock();
         if let Some(ref mut pty) = *pty_guard {
             if let Err(e) = pty.write(input.as_bytes()) {
-                tracing::error!("Failed to write to PTY: {}", e);
-                // Write failed - mark as exited
+                tracing::warn!(
+                    error = %e,
+                    input_len = input.len(),
+                    "PTY write failed, shell process likely exited"
+                );
                 *pty_guard = None;
             }
         }
@@ -683,7 +604,7 @@ impl TerminalPane {
                 mode.contains(TermMode::SGR_MOUSE),
                 false,
             );
-            self.send_input(&seq);
+            self.send_input(seq.as_str());
         } else if event.button == MouseButton::Left {
             // Start text selection using alacritty's Selection
             // Convert visual row to grid line (accounting for scroll offset)
@@ -730,7 +651,7 @@ impl TerminalPane {
                 mode.contains(TermMode::SGR_MOUSE),
                 true,
             );
-            self.send_input(&seq);
+            self.send_input(seq.as_str());
         } else if event.button == MouseButton::Left {
             // End text selection
             if self.dragging {
@@ -755,9 +676,36 @@ impl TerminalPane {
             return;
         };
 
-        // Update selection if dragging
-        if self.dragging {
-            // Convert visual row to grid line (accounting for scroll offset)
+        let mode = {
+            let term = self.term.lock();
+            *term.mode()
+        };
+
+        // Report drag/motion events to the terminal when requested
+        if self.dragging
+            && mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION | TermMode::MOUSE_MODE)
+        {
+            // Drag events use button code + 32 (left drag = 32, middle = 33, right = 34)
+            let seq = Self::encode_mouse_event(
+                32, // left button drag
+                col,
+                row,
+                mode.contains(TermMode::SGR_MOUSE),
+                false,
+            );
+            self.send_input(seq.as_str());
+        } else if mode.contains(TermMode::MOUSE_MOTION) && !self.dragging {
+            // Motion mode (1003): report all mouse movements, even without buttons
+            let seq = Self::encode_mouse_event(
+                35, // no button (motion only)
+                col,
+                row,
+                mode.contains(TermMode::SGR_MOUSE),
+                false,
+            );
+            self.send_input(seq.as_str());
+        } else if self.dragging {
+            // Update text selection if dragging without mouse reporting
             let mut term = self.term.lock();
             let display_offset = term.grid().display_offset() as i32;
             let line = Line(row as i32 - display_offset);
@@ -798,7 +746,7 @@ impl TerminalPane {
                 mode.contains(TermMode::SGR_MOUSE),
                 false,
             );
-            self.send_input(&seq);
+            self.send_input(seq.as_str());
         } else if mode.contains(TermMode::ALT_SCREEN) {
             // In alternate screen without mouse mode, send arrow keys for scrolling
             let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
@@ -826,34 +774,46 @@ impl TerminalPane {
         }
     }
 
-    /// Encode a mouse event for the PTY (SGR or legacy X11 format)
+    /// Encode a mouse event for the PTY (SGR or legacy X11 format).
+    ///
+    /// Button codes follow the xterm protocol:
+    /// - 0=left, 1=middle, 2=right (press/release)
+    /// - 32/33/34=left/middle/right drag
+    /// - 64=wheel up, 65=wheel down
     fn encode_mouse_event(
         button: u8,
         col: usize,
         row: usize,
         sgr_mode: bool,
         release: bool,
-    ) -> String {
+    ) -> MouseEscBuf {
         let mut buf = MouseEscBuf::new();
         if sgr_mode {
             // SGR 1006 format: ESC [ < button ; col ; row M/m
+            // SGR supports arbitrarily large coordinates (no 255 limit)
             let terminator = if release { 'm' } else { 'M' };
             let _ = write!(
                 buf,
                 "\x1b[<{};{};{}{}",
                 button,
-                col + 1,
-                row + 1,
+                col.saturating_add(1),
+                row.saturating_add(1),
                 terminator
             );
         } else {
-            // Legacy X11 format: ESC [ M Cb Cx Cy (all +32, max 255)
-            let cb: u8 = if release { 35 } else { 32 + button };
-            let cx = (32 + col + 1).min(255) as u8;
-            let cy = (32 + row + 1).min(255) as u8;
+            // Legacy X11 format: ESC [ M Cb Cx Cy
+            // All values are encoded as single bytes with +32 offset.
+            // Coordinates are 1-based and capped at 223 (255 - 32) to fit in a byte.
+            let cb: u8 = if release {
+                35
+            } else {
+                button.saturating_add(32)
+            };
+            let cx = (col.min(222) as u8).saturating_add(33); // (col+1)+32, max 255
+            let cy = (row.min(222) as u8).saturating_add(33); // (row+1)+32, max 255
             let _ = write!(buf, "\x1b[M{}{}{}", cb as char, cx as char, cy as char);
         }
-        buf.as_str().to_string()
+        buf
     }
 
     /// Convert GPUI modifiers to termwiz Modifiers
@@ -1406,9 +1366,17 @@ fn build_render_data(
     let term_colors = content.colors;
     let default_bg = theme.background;
 
-    // Collect cells and background regions
-    let mut cells: Vec<RenderCell> = Vec::new();
-    let mut bg_regions: Vec<BgRegion> = Vec::new();
+    // Use terminal's actual dimensions for capacity hints and bounds checks
+    let term_cols = term.columns();
+    let term_rows = term.screen_lines();
+
+    // Pre-allocate with capacity estimates based on terminal dimensions:
+    // - cells: ~1/3 of grid tends to be non-space characters
+    // - bg_regions: typically a few per row at most
+    let estimated_cells = (term_rows * term_cols) / 3;
+    let estimated_bg_regions = term_rows * 2;
+    let mut cells: Vec<RenderCell> = Vec::with_capacity(estimated_cells);
+    let mut bg_regions: Vec<BgRegion> = Vec::with_capacity(estimated_bg_regions);
 
     // Track current background region for on-the-fly merging (avoids grid allocation)
     // (row, col_start, col_end, color)
@@ -1419,11 +1387,6 @@ fn build_render_data(
     let cursor_col = content.cursor.point.column.0;
     let cursor_shape = content.cursor.shape;
     let display_offset = content.display_offset as i32;
-
-    // Use terminal's actual dimensions for cursor bounds check
-    // to avoid issues when display size and terminal size are temporarily out of sync
-    let term_cols = term.columns();
-    let term_rows = term.screen_lines();
 
     // Convert cursor line to visual row (accounting for scroll position)
     let cursor_visual_row = cursor_line + display_offset;
@@ -1570,14 +1533,23 @@ impl Render for TerminalPane {
         // Get font family from theme (user-configurable) with fallback to default
         let font_family: SharedString = cx.theme().font_family.clone();
 
-        // Get current font size and calculate cell dimensions
+        // Get current font size and check if cell dimensions need recalculation
         let current_font_size = display_state.font_size;
-        drop(display_state); // Release read lock before write
+        let font_size_bits = current_font_size.to_bits();
+        let needs_recalc = match &display_state.cached_font_key {
+            Some((cached_bits, ref cached_family)) => {
+                *cached_bits != font_size_bits || *cached_family != font_family
+            }
+            None => true,
+        };
+        drop(display_state); // Release read lock before potential write
 
-        // Calculate cell dimensions from actual font metrics (includes font family in cache key)
-        let (cell_width, cell_height) =
-            get_cell_dimensions(window, current_font_size, &font_family);
-        self.display.write().cell_dims = (cell_width, cell_height);
+        if needs_recalc {
+            let dims = calculate_cell_dimensions(window, current_font_size, &font_family);
+            let mut display = self.display.write();
+            display.cell_dims = dims;
+            display.cached_font_key = Some((font_size_bits, font_family.clone()));
+        }
 
         // Clone data needed for canvas callbacks (resize happens in prepaint with actual bounds)
         let term = self.term.clone();
@@ -1731,16 +1703,23 @@ impl Render for TerminalPane {
                                 rows: new_rows,
                             };
 
-                            // Resize PTY
+                            // Resize PTY (pass pixel dimensions for proper rendering support)
                             {
+                                let pixel_width = bounds_width as u16;
+                                let pixel_height = bounds_height as u16;
                                 let pty_guard = pty.lock();
                                 if let Some(ref pty_inner) = *pty_guard {
-                                    if let Err(e) = pty_inner.resize(new_rows, new_cols) {
-                                        tracing::error!(
-                                            "Failed to resize PTY to {}x{}: {}",
-                                            new_cols,
-                                            new_rows,
-                                            e
+                                    if let Err(e) = pty_inner.resize(
+                                        new_rows,
+                                        new_cols,
+                                        pixel_width,
+                                        pixel_height,
+                                    ) {
+                                        tracing::warn!(
+                                            cols = new_cols,
+                                            rows = new_rows,
+                                            error = %e,
+                                            "PTY resize failed, shell may have exited"
                                         );
                                     }
                                 }
@@ -1880,44 +1859,121 @@ impl Render for TerminalPane {
                             }
                         }
 
-                        // 2. Paint each cell at its grid position (like Alacritty/Ghostty)
-                        // This ensures cursor and text are perfectly aligned
-                        for cell in &render_data.cells {
-                            let x = origin.x + px(PADDING + cell.col as f32 * cell_width);
-                            let y = origin.y + px(PADDING + cell.row as f32 * cell_height);
+                        // 2. Paint each cell at its exact grid position.
+                        // Per-cell positioning guarantees cursor-text alignment since
+                        // both use the same coordinate: col * cell_width.
+                        //
+                        // Ligatures are handled by shaping small runs of adjacent
+                        // same-style characters together (so the shaper can substitute
+                        // ligature glyphs), but positioning each run at its starting
+                        // cell's grid coordinate. This limits any advance drift to
+                        // within a single run while enabling ligatures like => -> !=.
+                        let font_size_px = px(font_size);
 
-                            // Shape and paint this single character
-                            let text: SharedString = cell.c.to_string().into();
-                            let font = Font {
-                                family: font_family.clone(),
-                                features: FontFeatures::default(),
-                                fallbacks: None,
-                                weight: if cell.flags.contains(CellFlags::BOLD) {
-                                    FontWeight::BOLD
-                                } else {
-                                    FontWeight::NORMAL
-                                },
-                                style: if cell.flags.contains(CellFlags::ITALIC) {
-                                    FontStyle::Italic
-                                } else {
-                                    FontStyle::Normal
-                                },
-                            };
+                        // Pre-build font variants to avoid per-cell Font construction
+                        let font_normal = Font {
+                            family: font_family.clone(),
+                            features: ligature_features(),
+                            fallbacks: None,
+                            weight: FontWeight::NORMAL,
+                            style: FontStyle::Normal,
+                        };
+                        let font_bold = Font {
+                            family: font_family.clone(),
+                            features: ligature_features(),
+                            fallbacks: None,
+                            weight: FontWeight::BOLD,
+                            style: FontStyle::Normal,
+                        };
+                        let font_italic = Font {
+                            family: font_family.clone(),
+                            features: ligature_features(),
+                            fallbacks: None,
+                            weight: FontWeight::NORMAL,
+                            style: FontStyle::Italic,
+                        };
+                        let font_bold_italic = Font {
+                            family: font_family.clone(),
+                            features: ligature_features(),
+                            fallbacks: None,
+                            weight: FontWeight::BOLD,
+                            style: FontStyle::Italic,
+                        };
+
+                        let pick_font = |flags: CellFlags| -> Font {
+                            match (
+                                flags.contains(CellFlags::BOLD),
+                                flags.contains(CellFlags::ITALIC),
+                            ) {
+                                (false, false) => font_normal.clone(),
+                                (true, false) => font_bold.clone(),
+                                (false, true) => font_italic.clone(),
+                                (true, true) => font_bold_italic.clone(),
+                            }
+                        };
+
+                        // Shape consecutive same-row, same-style, adjacent cells as
+                        // small runs. Each run is positioned at its first cell's grid
+                        // coordinate, so cursor alignment is never lost. The shaper
+                        // sees 2+ adjacent characters and can form ligatures.
+                        let mut run_text = String::with_capacity(32);
+                        let cells = &render_data.cells;
+                        let mut i = 0;
+
+                        while i < cells.len() {
+                            let start = &cells[i];
+                            let run_row = start.row;
+                            let run_col = start.col;
+                            let run_fg = start.fg;
+                            let run_flags = start.flags;
+
+                            run_text.clear();
+                            run_text.push(start.c);
+                            let mut run_end_col = run_col;
+                            i += 1;
+
+                            // Extend run while cells are adjacent, same row, same style
+                            while i < cells.len() {
+                                let cell = &cells[i];
+                                let expected_next =
+                                    if cells[i - 1].flags.contains(CellFlags::WIDE_CHAR) {
+                                        run_end_col + 2
+                                    } else {
+                                        run_end_col + 1
+                                    };
+                                if cell.row != run_row
+                                    || cell.col != expected_next
+                                    || cell.fg != run_fg
+                                    || cell.flags.intersection(CellFlags::BOLD | CellFlags::ITALIC)
+                                        != run_flags
+                                            .intersection(CellFlags::BOLD | CellFlags::ITALIC)
+                                {
+                                    break;
+                                }
+                                run_text.push(cell.c);
+                                run_end_col = cell.col;
+                                i += 1;
+                            }
+
+                            // Shape and paint this run at its grid position
+                            let text: SharedString = run_text.clone().into();
+                            let font = pick_font(run_flags);
                             let run = TextRun {
-                                len: cell.c.len_utf8(),
+                                len: text.len(),
                                 font,
-                                color: cell.fg,
+                                color: run_fg,
                                 background_color: None,
                                 underline: None,
                                 strikethrough: None,
                             };
-                            let shaped =
-                                window
-                                    .text_system()
-                                    .shape_line(text, px(font_size), &[run], None);
+                            let shaped = {
+                                let text_system = window.text_system();
+                                text_system.shape_line(text, font_size_px, &[run], None)
+                            };
+                            let x = origin.x + px(PADDING + run_col as f32 * cell_width);
+                            let y = origin.y + px(PADDING + run_row as f32 * cell_height);
                             let _ = shaped.paint(Point::new(x, y), line_height, window, cx);
                         }
-
                         // 3. Paint cursor based on shape
                         if let Some(cursor) = render_data.cursor {
                             let cursor_x = origin.x + px(PADDING + cursor.col as f32 * cell_width);
@@ -2142,7 +2198,7 @@ mod tests {
             len,
             font: Font {
                 family: font_family.clone(),
-                features: FontFeatures::default(),
+                features: ligature_features(),
                 fallbacks: None,
                 weight,
                 style,
@@ -2213,6 +2269,7 @@ mod tests {
             },
             cell_dims: (12.0, 24.0),
             bounds: None,
+            cached_font_key: None,
         };
         let cloned = original.clone();
 
@@ -2679,6 +2736,7 @@ mod tests {
             cell_dims: (0.0, 0.0),
             bounds: None,
             font_size: DEFAULT_FONT_SIZE,
+            cached_font_key: None,
         };
 
         // Zero cell dimensions shouldn't cause panic
