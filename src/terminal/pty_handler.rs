@@ -191,14 +191,61 @@ fn get_validated_shell() -> String {
     DEFAULT_SHELL_WINDOWS.to_string()
 }
 
+/// Maximum length of a cached process name. Process names longer than this
+/// are truncated. 64 bytes covers virtually all real process names without
+/// heap allocation.
+const PROCESS_NAME_MAX_LEN: usize = 64;
+
+/// A fixed-capacity inline string for process names, avoiding heap allocation
+/// in the process cache hot path. Stores up to PROCESS_NAME_MAX_LEN bytes.
+#[derive(Clone, Debug, PartialEq)]
+struct InlineProcessName {
+    buf: [u8; PROCESS_NAME_MAX_LEN],
+    len: u8,
+}
+
+impl std::fmt::Display for InlineProcessName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl InlineProcessName {
+    fn new(s: &str) -> Self {
+        // Truncate at a valid UTF-8 char boundary
+        let truncated = if s.len() <= PROCESS_NAME_MAX_LEN {
+            s
+        } else {
+            let mut end = PROCESS_NAME_MAX_LEN;
+            while end > 0 && !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            &s[..end]
+        };
+        let bytes = truncated.as_bytes();
+        let mut buf = [0u8; PROCESS_NAME_MAX_LEN];
+        buf[..bytes.len()].copy_from_slice(bytes);
+        Self {
+            buf,
+            len: bytes.len() as u8,
+        }
+    }
+
+    fn as_str(&self) -> &str {
+        // SAFETY: new() guarantees we store valid UTF-8 at a char boundary
+        debug_assert!(std::str::from_utf8(&self.buf[..self.len as usize]).is_ok());
+        unsafe { std::str::from_utf8_unchecked(&self.buf[..self.len as usize]) }
+    }
+}
+
 /// Cached process state to avoid blocking UI thread.
 /// Updated periodically in the background.
 #[derive(Default)]
 struct ProcessCache {
     /// Whether there are running child processes
     has_children: bool,
-    /// Name of the foreground process (if any)
-    process_name: Option<String>,
+    /// Name of the foreground process (if any), stored inline to avoid heap allocation
+    process_name: Option<InlineProcessName>,
     /// When the cache was last updated
     last_update: Option<std::time::Instant>,
 }
@@ -264,7 +311,7 @@ impl PtyHandler {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .context("Failed to open PTY")?;
+            .context("Failed to open PTY pair (is the OS pseudoterminal subsystem available?)")?;
 
         // Get and validate the user's shell (security: prevents command injection)
         let shell = get_validated_shell();
@@ -353,7 +400,7 @@ impl PtyHandler {
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        // EOF - process exited
+                        // EOF - process exited cleanly
                         exited_clone.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -367,11 +414,14 @@ impl PtyHandler {
                                 tracing::trace!("PTY output queue full, dropping frame");
                             }
                             Err(TrySendError::Disconnected(_)) => {
-                                break; // Channel closed
+                                break; // Receiver dropped, pane is closing
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        // Read errors typically mean the PTY master fd was closed
+                        // (e.g., child process exited). This is normal shutdown.
+                        tracing::debug!(error = %e, "PTY read ended");
                         exited_clone.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -417,7 +467,7 @@ impl PtyHandler {
                 pixel_width: 0,
                 pixel_height: 0,
             })
-            .context("Failed to open PTY")?;
+            .context("Failed to open PTY pair for command")?;
 
         let mut cmd = CommandBuilder::new(command);
         for arg in args {
@@ -449,7 +499,7 @@ impl PtyHandler {
         let child = pair
             .slave
             .spawn_command(cmd)
-            .context("Failed to spawn command")?;
+            .with_context(|| format!("Failed to spawn command '{}'", command))?;
 
         // Get writer for sending input to PTY
         let writer = pair
@@ -484,10 +534,11 @@ impl PtyHandler {
                             tracing::trace!("PTY output queue full, dropping frame");
                         }
                         Err(TrySendError::Disconnected(_)) => {
-                            break;
+                            break; // Receiver dropped, pane is closing
                         }
                     },
-                    Err(_) => {
+                    Err(e) => {
+                        tracing::debug!(error = %e, "PTY read ended (command)");
                         exited_clone.store(true, Ordering::SeqCst);
                         break;
                     }
@@ -509,15 +560,18 @@ impl PtyHandler {
     /// Write input bytes to the PTY
     /// Note: No explicit flush - OS handles buffering efficiently for interactive input
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
-        self.writer.write_all(data)?;
-        Ok(())
+        self.writer
+            .write_all(data)
+            .context("Failed to write to PTY (shell process may have exited)")
     }
 
-    /// Read any pending output from the PTY (non-blocking)
-    pub fn read_output(&self) -> Vec<Vec<u8>> {
-        let mut output = Vec::new();
+    /// Read any pending output from the PTY (non-blocking).
+    /// Collects all pending chunks into a single contiguous buffer to reduce
+    /// per-chunk allocation overhead and allow the caller to process data in one pass.
+    pub fn read_output(&self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(32768);
         while let Ok(data) = self.output_rx.try_recv() {
-            output.push(data);
+            output.extend_from_slice(&data);
         }
         output
     }
@@ -528,14 +582,20 @@ impl PtyHandler {
     }
 
     /// Resize the PTY
-    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+    ///
+    /// # Arguments
+    /// * `rows` - Terminal height in rows
+    /// * `cols` - Terminal width in columns
+    /// * `pixel_width` - Total pixel width of the terminal area (optional, 0 if unknown)
+    /// * `pixel_height` - Total pixel height of the terminal area (optional, 0 if unknown)
+    pub fn resize(&self, rows: u16, cols: u16, pixel_width: u16, pixel_height: u16) -> Result<()> {
         self.pair
             .master
             .resize(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width,
+                pixel_height,
             })
             .context("Failed to resize PTY")?;
         Ok(())
@@ -559,7 +619,7 @@ impl PtyHandler {
         self.process_cache
             .lock()
             .ok()
-            .and_then(|cache| cache.process_name.clone())
+            .and_then(|cache| cache.process_name.as_ref().map(|n| n.to_string()))
     }
 
     /// Get the current working directory of the foreground process.
@@ -737,7 +797,7 @@ impl PtyHandler {
             let (has_children, process_name) = self.detect_child_processes();
             if let Ok(mut cache) = self.process_cache.lock() {
                 cache.has_children = has_children;
-                cache.process_name = process_name;
+                cache.process_name = process_name.map(|s| InlineProcessName::new(&s));
                 cache.last_update = Some(std::time::Instant::now());
             }
         }
@@ -1358,7 +1418,7 @@ mod tests {
         {
             let mut c = cache.lock().unwrap();
             c.has_children = true;
-            c.process_name = Some("vim".to_string());
+            c.process_name = Some(InlineProcessName::new("vim"));
             c.last_update = Some(std::time::Instant::now());
         }
 
@@ -1366,7 +1426,7 @@ mod tests {
         {
             let c = cache.lock().unwrap();
             assert!(c.has_children);
-            assert_eq!(c.process_name, Some("vim".to_string()));
+            assert_eq!(c.process_name.as_ref().map(|n| n.as_str()), Some("vim"));
             assert!(c.last_update.is_some());
         }
     }
@@ -2024,7 +2084,8 @@ mod tests {
                         if needs_refresh || i % 10 == 0 {
                             let mut c = cache.lock().unwrap();
                             c.has_children = thread_id % 2 == 0;
-                            c.process_name = Some(format!("proc-{}-{}", thread_id, i));
+                            c.process_name =
+                                Some(InlineProcessName::new(&format!("proc-{}-{}", thread_id, i)));
                             c.last_update = Some(std::time::Instant::now());
                         }
                     }
@@ -2647,7 +2708,7 @@ mod tests {
 
         let cache = Arc::new(Mutex::new(ProcessCache {
             has_children: true,
-            process_name: Some("test".to_string()),
+            process_name: Some(InlineProcessName::new("test")),
             last_update: Some(std::time::Instant::now()),
         }));
 

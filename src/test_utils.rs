@@ -68,6 +68,7 @@ impl TestTerminal {
                 cell_dims: (8.4, 17.0),
                 bounds: None,
                 font_size: 14.0,
+                cached_font_key: None,
             },
             output_buffer: String::new(),
             input_queue: VecDeque::new(),
