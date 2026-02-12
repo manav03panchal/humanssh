@@ -3,6 +3,8 @@
 //! This module provides compile-time constants for UI dimensions and settings.
 //! These are organized by component for maintainability.
 
+pub mod file;
+
 /// Terminal pane configuration.
 pub mod terminal {
     /// Default font size in pixels.
@@ -62,8 +64,6 @@ pub mod dialog {
     pub const WIDTH: f32 = 420.0;
     /// Menu minimum width.
     pub const MENU_MIN_WIDTH: f32 = 180.0;
-    /// Settings panel width.
-    pub const SETTINGS_WIDTH: f32 = 500.0;
 }
 
 /// Split pane configuration.
@@ -393,26 +393,6 @@ mod tests {
                 dialog::MENU_MIN_WIDTH
             );
         }
-
-        #[test]
-        fn test_settings_width_is_positive() {
-            assert!(
-                dialog::SETTINGS_WIDTH > 0.0,
-                "SETTINGS_WIDTH ({}) should be positive",
-                dialog::SETTINGS_WIDTH
-            );
-        }
-
-        #[test]
-        fn test_settings_width_is_larger_than_dialog() {
-            // Settings panel is typically larger than standard dialog
-            assert!(
-                dialog::SETTINGS_WIDTH >= dialog::WIDTH,
-                "SETTINGS_WIDTH ({}) should be at least as large as dialog WIDTH ({})",
-                dialog::SETTINGS_WIDTH,
-                dialog::WIDTH
-            );
-        }
     }
 
     // ==================== Split Configuration Tests ====================
@@ -664,17 +644,6 @@ mod tests {
 
     mod consistency_tests {
         use super::*;
-
-        #[test]
-        fn test_settings_width_matches_dialog_config() {
-            // The settings dialog width in settings.rs should match config
-            // Note: The actual value in settings.rs is 500.0, same as SETTINGS_WIDTH
-            assert_eq!(
-                dialog::SETTINGS_WIDTH,
-                500.0,
-                "SETTINGS_WIDTH should match the value used in settings.rs"
-            );
-        }
 
         #[test]
         fn test_font_defaults_are_consistent() {

@@ -59,19 +59,38 @@ pub fn register_actions(cx: &mut App) {
         cx.refresh_windows();
     });
 
-    // Register shell switching action (Windows only)
+    // Shell/decoration switching actions are now handled via config file.
+    // These action types remain registered for keybinding compatibility.
     #[cfg(target_os = "windows")]
     cx.on_action(|action: &SwitchShell, cx| {
-        super::persistence::save_windows_shell(action.0.clone());
-        tracing::info!("Switched to shell: {:?}", action.0);
+        tracing::info!("Shell preference: {:?} (set in config.toml)", action.0);
         cx.refresh_windows();
     });
 
-    // Register decoration switching action (Linux only)
     #[cfg(target_os = "linux")]
     cx.on_action(|action: &SwitchDecorations, cx| {
-        super::persistence::save_linux_decorations(action.0.clone());
-        tracing::info!("Switched to decorations: {:?} (restart required)", action.0);
+        tracing::info!(
+            "Decorations: {:?} (set in config.toml, restart required)",
+            action.0
+        );
+        cx.refresh_windows();
+    });
+
+    // macOS native feature actions
+    cx.on_action(|_: &crate::actions::ToggleSecureInput, cx| {
+        if crate::platform::is_secure_input_enabled() {
+            crate::platform::disable_secure_input();
+        } else {
+            crate::platform::enable_secure_input();
+        }
+        cx.refresh_windows();
+    });
+
+    cx.on_action(|_: &crate::actions::ToggleOptionAsAlt, cx| {
+        use std::sync::atomic::Ordering;
+        let current = crate::terminal::OPTION_AS_ALT.load(Ordering::Relaxed);
+        crate::terminal::OPTION_AS_ALT.store(!current, Ordering::Relaxed);
+        tracing::info!("Option as Alt: {}", !current);
         cx.refresh_windows();
     });
 }

@@ -7,6 +7,6 @@ mod settings;
 mod status_bar;
 mod workspace;
 
-pub use settings::toggle_settings_dialog;
+pub use settings::open_config_file;
 pub use status_bar::{render_status_bar, stats_collector, SystemStats};
 pub use workspace::Workspace;

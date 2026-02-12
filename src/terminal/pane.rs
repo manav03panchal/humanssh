@@ -26,7 +26,17 @@ use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as
 actions!(terminal, [SendTab, SendShiftTab]);
 use parking_lot::{Mutex, RwLock};
 use std::fmt::Write as FmtWrite;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+
+/// When true (default), macOS Option key is treated as Alt for terminal input.
+/// When false, Option key is stripped from modifier set, allowing macOS to insert special characters.
+pub static OPTION_AS_ALT: AtomicBool = AtomicBool::new(true);
+
+/// Set whether the macOS Option key should be treated as Alt.
+pub fn set_option_as_alt(enabled: bool) {
+    OPTION_AS_ALT.store(enabled, Ordering::Relaxed);
+}
 
 // Import centralized configuration
 // FONT_FAMILY used in tests via super::*
@@ -822,6 +832,12 @@ impl TerminalPane {
         if mods.shift {
             tm |= TermwizMods::SHIFT;
         }
+        // On macOS, only pass Alt through if OPTION_AS_ALT is enabled
+        #[cfg(target_os = "macos")]
+        if mods.alt && OPTION_AS_ALT.load(Ordering::Relaxed) {
+            tm |= TermwizMods::ALT;
+        }
+        #[cfg(not(target_os = "macos"))]
         if mods.alt {
             tm |= TermwizMods::ALT;
         }
@@ -1032,6 +1048,21 @@ impl TerminalPane {
                     }
                     "right" => {
                         self.send_input("\x1bf"); // forward-word
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+
+            // CSI u encoding for shifted navigation keys
+            if mods.shift && !mods.control && !mods.alt {
+                match key {
+                    "home" => {
+                        self.send_input("\x1b[1;2H"); // Shift+Home
+                        return;
+                    }
+                    "end" => {
+                        self.send_input("\x1b[1;2F"); // Shift+End
                         return;
                     }
                     _ => {}
@@ -1570,7 +1601,7 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &SendShiftTab, _window, _cx| {
                 this.send_input("\x1b[Z"); // Shift-Tab escape sequence
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 // Handle keys that GPUI might intercept for focus/navigation
                 // These must be caught early before GPUI consumes them
                 let key = event.keystroke.key.as_str();
@@ -1593,10 +1624,26 @@ impl Render for TerminalPane {
                     }
                     // Enter - GPUI might use for form submission
                     "enter" => {
-                        this.send_input("\r");
+                        if mods.shift {
+                            this.send_input("\x1b[13;2u"); // CSI u: Shift+Enter
+                        } else if !mods.control && !mods.alt {
+                            this.send_input("\r");
+                        } else {
+                            // Ctrl+Enter, Alt+Enter etc. → let handle_key encode
+                            this.handle_key(event, cx);
+                        }
+                        return;
+                    }
+                    // Backspace - handle Shift+Backspace as DEL
+                    "backspace" if mods.shift && !mods.control && !mods.alt && !mods.platform => {
+                        this.send_input("\x7f"); // DEL
                         return;
                     }
                     // Space - GPUI might use for button activation
+                    "space" if mods.shift && !mods.control && !mods.alt && !mods.platform => {
+                        this.send_input("\x1b[32;2u"); // CSI u: Shift+Space
+                        return;
+                    }
                     "space" if !mods.control && !mods.alt && !mods.platform => {
                         this.send_input(" ");
                         return;
@@ -1605,7 +1652,7 @@ impl Render for TerminalPane {
                 }
 
                 if mods.platform && key == "," {
-                    crate::app::toggle_settings_dialog(window, cx);
+                    crate::app::open_config_file();
                     return;
                 }
                 this.handle_key(event, cx);

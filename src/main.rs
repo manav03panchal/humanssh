@@ -5,7 +5,7 @@
 use anyhow::{Context, Result};
 use gpui::*;
 use gpui_component_assets::Assets;
-use humanssh::actions::Quit;
+use humanssh::actions::{Quit, ToggleSecureInput};
 use humanssh::app::Workspace;
 use humanssh::theme;
 use once_cell::sync::Lazy;
@@ -75,13 +75,15 @@ fn init_logging() {
 /// Build window options using saved bounds (macOS/Windows).
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 fn build_window_options() -> WindowOptions {
-    let saved = theme::load_window_bounds();
+    let config = humanssh::config::file::load_config();
+    let w = config.window_width.unwrap_or(1200.0);
+    let h = config.window_height.unwrap_or(800.0);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(saved.x), px(saved.y)),
+            origin: Point::new(px(100.0), px(100.0)),
             size: Size {
-                width: px(saved.width),
-                height: px(saved.height),
+                width: px(w),
+                height: px(h),
             },
         })),
         titlebar: Some(build_titlebar_options()),
@@ -93,23 +95,21 @@ fn build_window_options() -> WindowOptions {
 /// Includes window_decorations setting for Wayland/X11 compositors.
 #[cfg(target_os = "linux")]
 fn build_window_options() -> WindowOptions {
-    use crate::theme::{load_linux_decorations, LinuxDecorations};
+    let config = humanssh::config::file::load_config();
+    let w = config.window_width.unwrap_or(1200.0);
+    let h = config.window_height.unwrap_or(800.0);
 
-    let saved = theme::load_window_bounds();
-    let decorations = load_linux_decorations();
-
-    // Map our setting to GPUI's WindowDecorations
-    let window_decorations = match decorations {
-        LinuxDecorations::Server => Some(WindowDecorations::Server),
-        LinuxDecorations::Client => Some(WindowDecorations::Client),
+    let window_decorations = match config.linux_decorations.as_deref() {
+        Some("client") => Some(WindowDecorations::Client),
+        _ => Some(WindowDecorations::Server),
     };
 
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(saved.x), px(saved.y)),
+            origin: Point::new(px(100.0), px(100.0)),
             size: Size {
-                width: px(saved.width),
-                height: px(saved.height),
+                width: px(w),
+                height: px(h),
             },
         })),
         titlebar: Some(build_titlebar_options()),
@@ -121,13 +121,15 @@ fn build_window_options() -> WindowOptions {
 /// Build window options using saved bounds (other Unix).
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn build_window_options() -> WindowOptions {
-    let saved = theme::load_window_bounds();
+    let config = humanssh::config::file::load_config();
+    let w = config.window_width.unwrap_or(1200.0);
+    let h = config.window_height.unwrap_or(800.0);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(saved.x), px(saved.y)),
+            origin: Point::new(px(100.0), px(100.0)),
             size: Size {
-                width: px(saved.width),
-                height: px(saved.height),
+                width: px(w),
+                height: px(h),
             },
         })),
         titlebar: Some(build_titlebar_options()),
@@ -163,10 +165,8 @@ fn build_titlebar_options() -> TitlebarOptions {
 /// Linux: configurable based on user preference (Server = native, Client = custom)
 #[cfg(target_os = "linux")]
 fn build_titlebar_options() -> TitlebarOptions {
-    use crate::theme::{load_linux_decorations, LinuxDecorations};
-
-    let decorations = load_linux_decorations();
-    let appears_transparent = matches!(decorations, LinuxDecorations::Client);
+    let config = humanssh::config::file::load_config();
+    let appears_transparent = config.linux_decorations.as_deref() == Some("client");
 
     TitlebarOptions {
         title: Some("HumanSSH".into()),
@@ -219,6 +219,8 @@ fn register_keybindings(cx: &mut App) {
         // Settings
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("ctrl-,", OpenSettings, None),
+        // macOS: Toggle secure keyboard entry
+        KeyBinding::new("cmd-shift-s", ToggleSecureInput, None),
     ]);
 
     debug!("Keybindings registered");

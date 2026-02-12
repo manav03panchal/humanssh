@@ -36,7 +36,13 @@ sysinfo = "0.32"  # System information (CPU, memory, network)
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
+toml_edit = "0.22"
 termwiz = { version = "0.23.3", features = ["use_serde"] }
+
+# Config file watching
+notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-mini = "0.5"
 
 [dev-dependencies]
 # GPUI test support
@@ -100,9 +106,15 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSObject"] }
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSDockTile", "NSRunningApplication"] }
+
 [package.metadata.bundle]
 name = "HumanSSH"
 identifier = "com.humancorp.humanssh"
 copyright = "Copyright 2025"
 category = "Developer Tools"
 short_description = "A fast, cross-platform SSH terminal"
+resources = ["resources/*"]

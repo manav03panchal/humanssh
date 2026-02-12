@@ -121,12 +121,7 @@ impl Workspace {
         // Only save if bounds changed
         if self.last_saved_bounds != Some(current) {
             self.last_saved_bounds = Some(current);
-            crate::theme::save_window_bounds(crate::theme::WindowBoundsConfig {
-                x: current.0,
-                y: current.1,
-                width: current.2,
-                height: current.3,
-            });
+            crate::config::file::save_window_bounds(current.2, current.3);
             tracing::trace!(
                 x = current.0,
                 y = current.1,
@@ -583,8 +578,8 @@ impl Render for Workspace {
             .bg(background)
             .flex()
             .flex_col()
-            .on_action(cx.listener(|_this, _: &OpenSettings, window, cx| {
-                super::settings::toggle_settings_dialog(window, cx);
+            .on_action(cx.listener(|_this, _: &OpenSettings, _window, _cx| {
+                super::settings::open_config_file();
             }))
             .on_action(cx.listener(|this, _: &Quit, _window, cx| {
                 this.request_quit(cx);
@@ -613,7 +608,7 @@ impl Render for Workspace {
                         "d" => this.split_pane(SplitDirection::Horizontal, window, cx),
                         "}" | "]" => this.next_tab(cx),
                         "{" | "[" => this.prev_tab(cx),
-                        "," => super::settings::toggle_settings_dialog(window, cx),
+                        "," => super::settings::open_config_file(),
                         _ => {}
                     }
                 }
@@ -723,8 +718,8 @@ impl Render for Workspace {
                                     .small()
                                     .ghost()
                                     .tooltip("Settings (Cmd+,)")
-                                    .on_click(cx.listener(|_this, _, window, cx| {
-                                        super::settings::toggle_settings_dialog(window, cx);
+                                    .on_click(cx.listener(|_this, _, _window, _cx| {
+                                        super::settings::open_config_file();
                                     })),
                             ),
                     )

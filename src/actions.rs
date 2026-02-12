@@ -13,3 +13,6 @@ actions!(humanssh, [SplitVertical, SplitHorizontal, ClosePane]);
 
 // Focus navigation
 actions!(humanssh, [FocusNextPane, FocusPrevPane]);
+
+// macOS native features
+actions!(humanssh, [ToggleSecureInput, ToggleOptionAsAlt]);
