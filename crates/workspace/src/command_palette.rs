@@ -115,6 +115,11 @@ fn build_command_entries() -> Vec<CommandEntry> {
             action: Box::new(ToggleOptionAsAlt),
         },
         CommandEntry {
+            label: "Toggle Scratchpad",
+            shortcut: "Ctrl+`",
+            action: Box::new(ToggleScratchpad),
+        },
+        CommandEntry {
             label: "Quit",
             shortcut: "Cmd+Q",
             action: Box::new(Quit),

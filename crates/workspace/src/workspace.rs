@@ -6,7 +6,7 @@ mod command_palette;
 mod pane;
 mod pane_group;
 mod pane_group_view;
-mod quick_terminal;
+mod scratchpad;
 mod settings_opener;
 mod status_bar;
 mod workspace_view;

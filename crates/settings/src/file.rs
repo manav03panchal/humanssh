@@ -88,8 +88,6 @@ pub struct Config {
     /// Custom keybindings (override defaults).
     #[serde(default)]
     pub keybindings: Vec<KeybindingEntry>,
-    /// Quick terminal height as a fraction of workspace height (0.0 to 1.0).
-    pub quick_terminal_height: f32,
     /// Named profiles that override config defaults.
     #[serde(default)]
     pub profiles: Vec<Profile>,
@@ -114,7 +112,6 @@ impl Default for Config {
             scroll_reverse: false,
             font_fallbacks: Vec::new(),
             keybindings: Vec::new(),
-            quick_terminal_height: 0.4,
             profiles: Vec::new(),
             default_profile: None,
         }
@@ -257,11 +254,6 @@ scrollback-lines = 10000
 # window-width = 1200
 # window-height = 800
 
-# ─── Quick Terminal ───────────────────────────────────────────────
-
-# Height of the quick terminal as a fraction of the workspace (0.0–1.0)
-# quick-terminal-height = 0.4
-
 # ─── Platform ─────────────────────────────────────────────────────────
 
 # macOS: treat Option key as Alt for terminal input
@@ -288,7 +280,7 @@ option-as-alt = true
 #   toggle-secure-input, toggle-option-as-alt,
 #   search, search-next, search-prev, search-toggle-regex,
 #   enter-copy-mode, exit-copy-mode,
-#   toggle-quick-terminal
+#   toggle-scratchpad
 #
 # Default shortcuts:
 #   Cmd+T / Ctrl+Shift+T  — new tab
@@ -1070,18 +1062,5 @@ font-size = 16
         assert_eq!(cfg.theme, "Nord");
         assert!(cfg.profiles.is_empty());
         assert!(cfg.default_profile.is_none());
-    }
-
-    #[test]
-    fn quick_terminal_height_defaults_to_0_4() {
-        let cfg: Config = toml::from_str("").unwrap();
-        assert!((cfg.quick_terminal_height - 0.4).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn parses_quick_terminal_height() {
-        let toml_str = r#"quick-terminal-height = 0.6"#;
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert!((cfg.quick_terminal_height - 0.6).abs() < f32::EPSILON);
     }
 }

@@ -3,12 +3,15 @@
 use crate::command_palette::{CommandPalette, CommandPaletteDismiss};
 use crate::pane::PaneKind;
 use crate::pane_group::{PaneNode, SplitDirection};
-use crate::quick_terminal::QuickTerminalState;
+use crate::scratchpad::ScratchpadState;
 use crate::status_bar::{render_status_bar, stats_collector, SystemStats};
-use actions::{CloseTab, OpenSettings, Quit, ToggleCommandPalette, ToggleQuickTerminal};
+use actions::{
+    ClosePane, CloseTab, FocusNextPane, FocusPrevPane, NewTab, NextTab, OpenSettings, PrevTab,
+    Quit, SplitHorizontal, SplitVertical, ToggleCommandPalette, ToggleScratchpad,
+};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, hsla, px, relative, App, AppContext, ClickEvent, Context, ElementId, Entity, FontWeight,
+    div, hsla, px, App, AppContext, ClickEvent, Context, ElementId, Entity, Focusable, FontWeight,
     InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
     StatefulInteractiveElement, Styled, Subscription, Window,
 };
@@ -108,8 +111,8 @@ pub struct Workspace {
     last_saved_bounds: Option<(f32, f32, f32, f32)>,
     /// Cached system stats for status bar
     cached_stats: SystemStats,
-    /// Quick terminal (drop-down visor) state
-    pub(crate) quick_terminal: Option<QuickTerminalState>,
+    /// Scratchpad (persistent notes overlay) state
+    pub(crate) scratchpad: Option<ScratchpadState>,
     /// Command palette entity (Some when visible)
     command_palette: Option<Entity<CommandPalette>>,
     /// Subscription for command palette events (kept alive while palette is open)
@@ -148,7 +151,7 @@ impl Workspace {
             last_title_update: std::time::Instant::now(),
             last_saved_bounds: None,
             cached_stats: SystemStats::default(),
-            quick_terminal: None,
+            scratchpad: None,
             command_palette: None,
             _command_palette_subscriptions: Vec::new(),
         }
@@ -290,6 +293,15 @@ impl Workspace {
                 |this, _palette, event: &CommandPaletteDismiss, window, cx| {
                     let action = event.action.as_ref().map(|a| a.boxed_clone());
                     this.dismiss_command_palette(cx);
+
+                    // Restore focus to active pane before dispatching so the
+                    // action finds its handler in the focus chain
+                    if let Some(tab) = this.tabs.get(this.active_tab) {
+                        if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                            window.focus(&pane.focus_handle(cx));
+                        }
+                    }
+
                     if let Some(action) = action {
                         window.dispatch_action(action, cx);
                     }
@@ -535,43 +547,47 @@ impl Workspace {
         self.do_close_pane(cx);
     }
 
-    /// Ensure the quick terminal exists, creating it on first call.
-    pub(crate) fn ensure_quick_terminal(&mut self, cx: &mut Context<Self>) {
-        if self.quick_terminal.is_some() {
-            return;
-        }
-        let height = settings::file::load_config()
-            .quick_terminal_height
-            .clamp(0.1, 1.0);
-
-        #[allow(unused_mut)]
-        let mut state = QuickTerminalState::new(height, Vec::new(), cx);
-
-        // Subscribe to terminal exit so we tear down the quick terminal when the shell exits
-        #[cfg(not(test))]
-        {
-            let terminal = state.terminal.clone();
-            let sub = cx.subscribe(&terminal, |this, _, _: &TerminalExitEvent, cx| {
-                this.quick_terminal = None;
-                cx.notify();
-            });
-            state._subscriptions.push(sub);
-        }
-
-        self.quick_terminal = Some(state);
+    /// Returns true if any overlay (scratchpad, command palette, or confirmation dialog)
+    /// is active, meaning workspace actions should be suppressed.
+    fn has_active_overlay(&self) -> bool {
+        self.scratchpad.as_ref().is_some_and(|sp| sp.visible)
+            || self.command_palette.is_some()
+            || self.pending_action.is_some()
     }
 
-    /// Toggle the quick terminal overlay.
-    fn toggle_quick_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.ensure_quick_terminal(cx);
+    /// Ensure the scratchpad exists, creating it on first call.
+    pub(crate) fn ensure_scratchpad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scratchpad.is_some() {
+            return;
+        }
 
-        if let Some(qt) = &mut self.quick_terminal {
-            let now_visible = qt.toggle();
+        let content = crate::scratchpad::load_scratchpad_content();
+        let input = cx.new(|cx| {
+            gpui_component::input::InputState::new(window, cx)
+                .multi_line(true)
+                .placeholder("Notes... (Ctrl+` to toggle)")
+                .default_value(content)
+        });
+
+        self.scratchpad = Some(ScratchpadState {
+            input,
+            visible: true,
+            _subscriptions: Vec::new(),
+        });
+    }
+
+    /// Toggle the scratchpad overlay.
+    fn toggle_scratchpad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_scratchpad(window, cx);
+
+        if let Some(sp) = &mut self.scratchpad {
+            let now_visible = sp.toggle();
             if now_visible {
-                let focus = qt.terminal.read(cx).focus_handle.clone();
+                let focus = sp.input.read(cx).focus_handle(cx).clone();
                 focus.focus(window);
             } else {
-                // Return focus to active workspace pane
+                // Save content and return focus to active workspace pane
+                sp.save(cx);
                 if let Some(tab) = self.tabs.get(self.active_tab) {
                     if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
                         let pane_focus = pane.focus_handle(cx);
@@ -583,11 +599,12 @@ impl Workspace {
         }
     }
 
-    /// Hide the quick terminal if visible, returning focus to the workspace.
-    fn hide_quick_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(qt) = &mut self.quick_terminal {
-            if qt.visible {
-                qt.visible = false;
+    /// Hide the scratchpad if visible, saving content and returning focus to the workspace.
+    fn hide_scratchpad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sp) = &mut self.scratchpad {
+            if sp.visible {
+                sp.visible = false;
+                sp.save(cx);
                 if let Some(tab) = self.tabs.get(self.active_tab) {
                     if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
                         let pane_focus = pane.focus_handle(cx);
@@ -708,13 +725,13 @@ impl Render for Workspace {
         self.maybe_save_window_bounds(window);
 
         // Focus the active pane (unless an overlay is focused)
-        let quick_terminal_focused = self
-            .quick_terminal
+        let scratchpad_focused = self
+            .scratchpad
             .as_ref()
-            .is_some_and(|qt| qt.visible && qt.terminal.read(cx).focus_handle.is_focused(window));
+            .is_some_and(|sp| sp.visible && sp.input.read(cx).focus_handle(cx).is_focused(window));
         let command_palette_focused = self.command_palette.is_some();
 
-        if !quick_terminal_focused && !command_palette_focused {
+        if !scratchpad_focused && !command_palette_focused {
             if let Some(tab) = self.tabs.get(self.active_tab) {
                 if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
                     let pane_focus = pane.focus_handle(cx);
@@ -769,13 +786,64 @@ impl Render for Workspace {
                 this.request_quit(cx);
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _window, cx| {
+                if this.has_active_overlay() { return; }
                 this.request_close_pane(cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleQuickTerminal, window, cx| {
-                this.toggle_quick_terminal(window, cx);
+            .on_action(cx.listener(|this, _: &ToggleScratchpad, window, cx| {
+                this.toggle_scratchpad(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
                 this.toggle_command_palette(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTab, _window, cx| {
+                if this.has_active_overlay() { return; }
+                this.new_tab(cx);
+            }))
+            .on_action(cx.listener(|this, _: &NextTab, _window, cx| {
+                if this.has_active_overlay() { return; }
+                this.next_tab(cx);
+            }))
+            .on_action(cx.listener(|this, _: &PrevTab, _window, cx| {
+                if this.has_active_overlay() { return; }
+                this.prev_tab(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitVertical, window, cx| {
+                if this.has_active_overlay() { return; }
+                this.split_pane(SplitDirection::Horizontal, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SplitHorizontal, window, cx| {
+                if this.has_active_overlay() { return; }
+                this.split_pane(SplitDirection::Vertical, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ClosePane, _window, cx| {
+                if this.has_active_overlay() { return; }
+                this.request_close_pane(cx);
+            }))
+            .on_action(cx.listener(|this, _: &FocusNextPane, window, cx| {
+                if this.has_active_overlay() { return; }
+                if let Some(tab) = this.tabs.get(this.active_tab) {
+                    let panes = tab.panes.all_panes();
+                    if let Some(pos) = panes.iter().position(|(id, _)| *id == tab.active_pane) {
+                        let next = (pos + 1) % panes.len();
+                        let (next_id, next_pane) = &panes[next];
+                        let focus = next_pane.focus_handle(cx);
+                        this.set_active_pane(*next_id, cx);
+                        window.focus(&focus);
+                    }
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FocusPrevPane, window, cx| {
+                if this.has_active_overlay() { return; }
+                if let Some(tab) = this.tabs.get(this.active_tab) {
+                    let panes = tab.panes.all_panes();
+                    if let Some(pos) = panes.iter().position(|(id, _)| *id == tab.active_pane) {
+                        let prev = if pos == 0 { panes.len() - 1 } else { pos - 1 };
+                        let (prev_id, prev_pane) = &panes[prev];
+                        let focus = prev_pane.focus_handle(cx);
+                        this.set_active_pane(*prev_id, cx);
+                        window.focus(&focus);
+                    }
+                }
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
@@ -929,36 +997,43 @@ impl Render for Workspace {
             )
             // Status bar
             .child(render_status_bar(&self.cached_stats, cx))
-            // Quick terminal overlay
+            // Scratchpad overlay
             .when(
-                self.quick_terminal.as_ref().is_some_and(|qt| qt.visible),
+                self.scratchpad.as_ref().is_some_and(|sp| sp.visible),
                 |d| {
-                    let qt = self.quick_terminal.as_ref().expect("checked above");
-                    let height_frac = qt.height_fraction;
-                    let terminal_entity = qt.terminal.clone();
+                    let sp = self.scratchpad.as_ref().expect("checked above");
+                    let input_entity = sp.input.clone();
                     d.child(
                         div()
-                            .id("quick-terminal-backdrop")
+                            .id("scratchpad-backdrop")
                             .absolute()
                             .inset_0()
+                            .bg(hsla(0.0, 0.0, 0.0, 0.4))
                             .on_click(cx.listener(|this, _, window, cx| {
-                                this.hide_quick_terminal(window, cx);
+                                this.hide_scratchpad(window, cx);
                             }))
                     )
                     .child(
                         div()
-                            .id("quick-terminal-overlay")
+                            .id("scratchpad-overlay")
                             .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(relative(height_frac))
-                            .bg(background)
-                            .border_b_1()
-                            .border_color(border_color)
+                            .top(px(60.0))
+                            .left(px(80.0))
+                            .right(px(80.0))
+                            .bottom(px(80.0))
+                            .bg(hsla(0.0, 0.0, 0.10, 1.0))
+                            .border_1()
+                            .border_color(hsla(0.0, 0.0, 0.25, 1.0))
+                            .rounded(px(8.0))
                             .shadow_lg()
                             .overflow_hidden()
-                            .child(terminal_entity)
+                            .p(px(12.0))
+                            .child(
+                                gpui_component::input::Input::new(&input_entity)
+                                    .appearance(false)
+                                    .bordered(false)
+                                    .h_full()
+                            )
                     )
                 },
             )
