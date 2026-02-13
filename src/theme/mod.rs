@@ -4,41 +4,16 @@
 //!
 //! # Modules
 //!
-//! - `persistence` - Settings loading/saving with validation
+//! - `persistence` - Platform-specific types (WindowsShell)
 //! - `colors` - Terminal color mapping from theme
-//! - `actions` - Theme switching actions
-//!
-//! # Usage
-//!
-//! ```ignore
-//! // Get terminal colors for rendering
-//! let colors = terminal_colors(cx);
-//! let bg = colors.background;
-//! let fg = colors.foreground;
-//!
-//! // Switch theme via action
-//! cx.dispatch_action(Box::new(SwitchTheme("Catppuccin Latte".into())));
-//! ```
+//! - `actions` - Action handlers (secure input, option-as-alt)
 
 mod actions;
 mod colors;
 mod persistence;
 
 // Re-export public API
-#[cfg(target_os = "linux")]
-pub use actions::SwitchDecorations;
-#[cfg(target_os = "windows")]
-pub use actions::SwitchShell;
-pub use actions::{SwitchFont, SwitchTheme, SwitchThemeMode};
 pub use colors::{terminal_colors, TerminalColors};
-#[cfg(target_os = "linux")]
-pub use persistence::{load_linux_decorations, save_linux_decorations};
-pub use persistence::{
-    load_settings, load_window_bounds, save_settings, save_window_bounds, LinuxDecorations,
-    Settings, WindowBoundsConfig, WindowsShell,
-};
-#[cfg(target_os = "windows")]
-pub use persistence::{load_windows_shell, save_windows_shell};
 
 use gpui::App;
 use gpui_component::theme::{Theme, ThemeRegistry};
@@ -69,27 +44,26 @@ pub fn set_intended_font(font: String) {
 
 /// Initialize theme watching and actions
 pub fn init(cx: &mut App) {
-    // Load saved settings - take ownership, no cloning
-    let saved_settings = load_settings();
-    let saved_theme = saved_settings
-        .theme
-        .unwrap_or_else(|| "Catppuccin Mocha".to_string());
-    let saved_font = saved_settings.font_family;
+    // Ensure config file exists (create default on first launch)
+    crate::config::file::ensure_config_file();
 
-    // Apply saved font family if present, otherwise use platform default
-    use crate::config::terminal::FONT_FAMILY;
-    let font_to_apply = saved_font.unwrap_or_else(|| FONT_FAMILY.to_string());
+    // Load config
+    let config = crate::config::file::load_config();
 
-    // Store the intended font so we can restore it after apply_config calls
-    set_intended_font(font_to_apply.clone());
-    Theme::global_mut(cx).font_family = font_to_apply.into();
+    // Apply font
+    set_intended_font(config.font_family.clone());
+    Theme::global_mut(cx).font_family = config.font_family.clone().into();
+
+    // Apply option-as-alt
+    crate::terminal::OPTION_AS_ALT
+        .store(config.option_as_alt, std::sync::atomic::Ordering::Relaxed);
 
     // Find and watch themes directory
+    let saved_theme = config.theme.clone();
     if let Some(themes_dir) = find_themes_dir() {
         tracing::info!("Loading themes from: {:?}", themes_dir);
         let theme_for_closure = saved_theme.clone();
         if let Err(e) = ThemeRegistry::watch_dir(themes_dir, cx, move |cx| {
-            // Apply saved theme when themes are loaded
             if let Some(theme) = ThemeRegistry::global(cx)
                 .themes()
                 .get(&theme_for_closure as &str)
@@ -105,7 +79,6 @@ pub fn init(cx: &mut App) {
                 Theme::global_mut(cx).apply_config(&theme);
                 tracing::info!("Applied default theme: Catppuccin Mocha");
             }
-            // Font restoration now happens in the observer below
         }) {
             tracing::warn!("Failed to watch themes directory: {}", e);
         }
@@ -113,9 +86,8 @@ pub fn init(cx: &mut App) {
         tracing::warn!("Themes directory not found, using default theme");
     }
 
-    // Watch for theme changes - restore font and save settings
+    // Watch for theme changes -- restore font after apply_config calls
     cx.observe_global::<Theme>(|cx| {
-        // Get all values we need first (immutable borrows)
         let themes_empty = ThemeRegistry::global(cx).themes().is_empty();
         if themes_empty {
             return;
@@ -123,31 +95,20 @@ pub fn init(cx: &mut App) {
 
         let intended_font = get_intended_font();
         let current_font = Theme::global(cx).font_family.to_string();
-        let theme_name = Theme::global(cx).theme_name().to_string();
-        let theme_in_registry = ThemeRegistry::global(cx)
-            .themes()
-            .contains_key(&theme_name as &str);
 
-        // If apply_config reset the font, restore our intended font
         if current_font != intended_font {
             tracing::info!("Restoring font: {} -> {}", current_font, intended_font);
-            Theme::global_mut(cx).font_family = intended_font.clone().into();
+            Theme::global_mut(cx).font_family = intended_font.into();
         }
-
-        // Save settings
-        let mut settings = load_settings();
-
-        // Only update theme if it's a custom theme from our registry
-        if theme_in_registry {
-            settings.theme = Some(theme_name);
-        }
-
-        settings.font_family = Some(intended_font);
-        save_settings(&settings);
     })
     .detach();
 
-    // Register theme switching actions
+    // Start config file watcher (live reload)
+    if let Some(debouncer) = crate::config::file::watch_config(cx) {
+        Box::leak(Box::new(debouncer));
+    }
+
+    // Register action handlers
     actions::register_actions(cx);
 }
 
@@ -205,87 +166,16 @@ fn find_themes_dir() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::clone_on_copy)]
 mod tests {
-    use super::{
-        find_themes_dir, load_settings, load_window_bounds, terminal_colors, Settings, SwitchFont,
-        SwitchTheme, SwitchThemeMode, TerminalColors, Theme, ThemeRegistry, WindowBoundsConfig,
-    };
+    use super::{find_themes_dir, TerminalColors};
     use tempfile::TempDir;
-
-    mod public_api {
-        use super::{
-            load_settings, load_window_bounds, terminal_colors, Settings, SwitchFont, SwitchTheme,
-            SwitchThemeMode, TerminalColors, WindowBoundsConfig,
-        };
-
-        #[test]
-        fn re_exports_switch_theme_action() {
-            // Verify SwitchTheme is accessible from mod.rs
-            let action = SwitchTheme("Test Theme".into());
-            assert_eq!(action.0.as_ref(), "Test Theme");
-        }
-
-        #[test]
-        fn re_exports_switch_font_action() {
-            // Verify SwitchFont is accessible from mod.rs
-            let action = SwitchFont("Test Font".into());
-            assert_eq!(action.0.as_ref(), "Test Font");
-        }
-
-        #[test]
-        fn re_exports_switch_theme_mode_action() {
-            use gpui_component::theme::ThemeMode;
-            // Verify SwitchThemeMode is accessible from mod.rs
-            let action = SwitchThemeMode(ThemeMode::Dark);
-            assert_eq!(action.0, ThemeMode::Dark);
-        }
-
-        #[test]
-        fn re_exports_terminal_colors_function() {
-            // Verify terminal_colors is accessible (it's re-exported from colors.rs)
-            // We can't call it without an App context, but we can verify the type exists
-            let _: fn(&gpui::App) -> TerminalColors = terminal_colors;
-        }
-
-        #[test]
-        fn re_exports_settings_struct() {
-            // Verify Settings is accessible from mod.rs
-            let settings = Settings::default();
-            assert!(settings.theme.is_none());
-        }
-
-        #[test]
-        fn re_exports_window_bounds_config() {
-            // Verify WindowBoundsConfig is accessible from mod.rs
-            let bounds = WindowBoundsConfig::default();
-            assert_eq!(bounds.width, 1200.0);
-        }
-
-        #[test]
-        fn re_exports_load_settings() {
-            // Verify load_settings is accessible
-            // Just verify the function exists and can be called
-            let _settings = load_settings();
-        }
-
-        #[test]
-        fn re_exports_load_window_bounds() {
-            // Verify load_window_bounds is accessible
-            let _bounds = load_window_bounds();
-        }
-    }
 
     mod find_themes_dir {
         use super::{find_themes_dir, TempDir};
 
         #[test]
         fn returns_none_when_no_themes_dir_exists() {
-            // In a clean environment without themes/, should return None
-            // This test depends on the current working directory not having a themes folder
-            // We can't reliably test this without changing CWD, so we just verify the function exists
             let result = find_themes_dir();
-            // Result may be Some or None depending on environment
             if let Some(path) = result {
                 assert!(
                     path.is_dir(),
@@ -298,11 +188,9 @@ mod tests {
         fn validates_themes_dir_is_directory() {
             let temp_dir = TempDir::new().unwrap();
 
-            // Create a file called "themes" (not a directory)
             let themes_file = temp_dir.path().join("themes");
             std::fs::write(&themes_file, "not a directory").unwrap();
 
-            // The validate_themes_dir helper should reject files
             let canonical = themes_file.canonicalize();
             if let Ok(path) = canonical {
                 assert!(!path.is_dir());
@@ -315,7 +203,6 @@ mod tests {
             let themes_dir = temp_dir.path().join("themes");
             std::fs::create_dir_all(&themes_dir).unwrap();
 
-            // Canonicalize should resolve to absolute path
             let canonical = themes_dir.canonicalize().unwrap();
             assert!(canonical.is_absolute());
             assert!(canonical.is_dir());
@@ -323,125 +210,25 @@ mod tests {
     }
 
     mod theme_integration {
-        use super::{Settings, TerminalColors};
+        use super::TerminalColors;
 
         #[test]
-        fn default_theme_name_is_catppuccin_mocha() {
-            // The default theme used when no saved setting exists
-            let settings = Settings::default();
-            let default_theme = settings
-                .theme
-                .unwrap_or_else(|| "Catppuccin Mocha".to_string());
-            assert_eq!(default_theme, "Catppuccin Mocha");
+        fn default_config_theme_is_catppuccin_mocha() {
+            let config = crate::config::file::Config::default();
+            assert_eq!(config.theme, "Catppuccin Mocha");
         }
 
         #[test]
         fn terminal_colors_default_matches_catppuccin_mocha() {
-            // TerminalColors::default() should use Catppuccin Mocha colors
             let colors = TerminalColors::default();
-
-            // Catppuccin Mocha background is #1e1e2e (dark)
             assert!(
                 colors.background.l < 0.25,
                 "Catppuccin Mocha background should be dark"
             );
-
-            // Catppuccin Mocha foreground is #cdd6f4 (light)
             assert!(
                 colors.foreground.l > 0.7,
                 "Catppuccin Mocha foreground should be light"
             );
-        }
-    }
-
-    mod theme_registry_operations {
-        use super::{Theme, ThemeRegistry};
-
-        #[test]
-        fn theme_registry_type_exists() {
-            // Verify ThemeRegistry is importable and usable
-            let _: &dyn Fn(&gpui::App) -> &ThemeRegistry = &ThemeRegistry::global;
-        }
-
-        #[test]
-        fn theme_type_exists() {
-            // Verify Theme is importable and usable
-            let _: &dyn Fn(&gpui::App) -> &Theme = &Theme::global;
-        }
-    }
-
-    mod settings_integration {
-        use super::{Settings, TempDir, WindowBoundsConfig};
-        use std::fs;
-
-        #[test]
-        fn settings_preserves_theme_name() {
-            let settings = Settings {
-                theme: Some("Tokyo Night".to_string()),
-                font_family: None,
-                window_bounds: None,
-                ..Default::default()
-            };
-
-            // Serialize and deserialize
-            let json = serde_json::to_string(&settings).unwrap();
-            let restored: Settings = serde_json::from_str(&json).unwrap();
-
-            assert_eq!(restored.theme, Some("Tokyo Night".to_string()));
-        }
-
-        #[test]
-        fn settings_preserves_font_family() {
-            let settings = Settings {
-                theme: None,
-                font_family: Some("JetBrains Mono".to_string()),
-                window_bounds: None,
-                ..Default::default()
-            };
-
-            let json = serde_json::to_string(&settings).unwrap();
-            let restored: Settings = serde_json::from_str(&json).unwrap();
-
-            assert_eq!(restored.font_family, Some("JetBrains Mono".to_string()));
-        }
-
-        #[test]
-        fn settings_roundtrip_with_all_fields() {
-            let settings = Settings {
-                theme: Some("Nord".to_string()),
-                font_family: Some("Fira Code".to_string()),
-                window_bounds: Some(WindowBoundsConfig {
-                    x: 100.0,
-                    y: 200.0,
-                    width: 1920.0,
-                    height: 1080.0,
-                }),
-                ..Default::default()
-            };
-
-            let json = serde_json::to_string_pretty(&settings).unwrap();
-            let restored: Settings = serde_json::from_str(&json).unwrap();
-
-            assert_eq!(restored.theme, settings.theme);
-            assert_eq!(restored.font_family, settings.font_family);
-            let orig = settings.window_bounds.unwrap();
-            let rest = restored.window_bounds.unwrap();
-            assert_eq!(orig.x, rest.x);
-            assert_eq!(orig.y, rest.y);
-            assert_eq!(orig.width, rest.width);
-            assert_eq!(orig.height, rest.height);
-        }
-
-        #[test]
-        fn save_settings_creates_config_directory() {
-            let temp_dir = TempDir::new().unwrap();
-            let config_path = temp_dir.path().join("humanssh").join("settings.json");
-
-            // Create parent directories manually
-            fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-
-            // Verify directory was created
-            assert!(config_path.parent().unwrap().exists());
         }
     }
 
@@ -452,17 +239,14 @@ mod tests {
         fn canonicalize_resolves_symlinks() {
             let temp_dir = TempDir::new().unwrap();
 
-            // Create actual themes directory
             let real_themes = temp_dir.path().join("real_themes");
             std::fs::create_dir_all(&real_themes).unwrap();
 
-            // Create symlink to themes directory (Unix only)
             #[cfg(unix)]
             {
                 let symlink_path = temp_dir.path().join("themes_link");
                 std::os::unix::fs::symlink(&real_themes, &symlink_path).unwrap();
 
-                // Canonicalize should resolve to the real path
                 let canonical = symlink_path.canonicalize().unwrap();
                 assert_eq!(
                     canonical,
@@ -479,7 +263,6 @@ mod tests {
 
             std::fs::create_dir_all(temp_dir.path().join("themes")).unwrap();
 
-            // The path with .. should resolve to the same place
             if themes_dir.exists() {
                 let canonical = themes_dir.canonicalize().unwrap();
                 assert!(!canonical.to_string_lossy().contains(".."));
@@ -490,50 +273,11 @@ mod tests {
         fn rejects_non_directory_themes_path() {
             let temp_dir = TempDir::new().unwrap();
 
-            // Create a file called "themes"
             let themes_file = temp_dir.path().join("themes");
             std::fs::write(&themes_file, "I am a file, not a directory").unwrap();
 
-            // Should be a file, not a directory
             assert!(themes_file.is_file());
             assert!(!themes_file.is_dir());
-        }
-    }
-
-    mod light_dark_mode {
-        use gpui_component::theme::ThemeMode;
-
-        #[test]
-        fn theme_mode_has_dark_variant() {
-            let mode = ThemeMode::Dark;
-            assert_eq!(mode, ThemeMode::Dark);
-        }
-
-        #[test]
-        fn theme_mode_has_light_variant() {
-            let mode = ThemeMode::Light;
-            assert_eq!(mode, ThemeMode::Light);
-        }
-
-        #[test]
-        fn theme_mode_is_copy() {
-            let mode = ThemeMode::Dark;
-            let copied = mode;
-            assert_eq!(mode, copied);
-        }
-
-        #[test]
-        fn theme_mode_is_clone() {
-            let mode = ThemeMode::Light;
-            let cloned = mode.clone();
-            assert_eq!(mode, cloned);
-        }
-
-        #[test]
-        fn theme_mode_equality() {
-            assert_eq!(ThemeMode::Dark, ThemeMode::Dark);
-            assert_eq!(ThemeMode::Light, ThemeMode::Light);
-            assert_ne!(ThemeMode::Dark, ThemeMode::Light);
         }
     }
 }

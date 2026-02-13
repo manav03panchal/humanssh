@@ -19,12 +19,39 @@
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
-    <string>11.0</string>
+    <string>12.0</string>
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSSupportsAutomaticGraphicsSwitching</key>
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.developer-tools</string>
+
+    <!-- Permission usage descriptions -->
+    <key>NSCameraUsageDescription</key>
+    <string>HumanSSH needs camera access for terminal applications that use the camera, such as video conferencing CLI tools.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>HumanSSH needs microphone access for terminal applications that use audio input.</string>
+    <key>NSAppleEventsUsageDescription</key>
+    <string>HumanSSH needs to send Apple Events to automate tasks and interact with other applications.</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>HumanSSH needs access to the Desktop folder for terminal file operations.</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>HumanSSH needs access to the Documents folder for terminal file operations.</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>HumanSSH needs access to the Downloads folder for terminal file operations.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>HumanSSH needs local network access for SSH connections and network tools.</string>
+
+    <!-- App Transport Security - allow all connections for SSH/network tools -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+
+    <!-- Supports Secure Coding -->
+    <key>NSSupportsSecureCoding</key>
+    <true/>
 </dict>
 </plist>

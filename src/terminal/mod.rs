@@ -43,7 +43,7 @@ mod pane;
 mod pty_handler;
 pub mod types;
 
-pub use pane::{SendShiftTab, SendTab, TerminalExitEvent, TerminalPane};
+pub use pane::{SendShiftTab, SendTab, TerminalExitEvent, TerminalPane, OPTION_AS_ALT};
 pub use pty_handler::PtyHandler;
 
 /// Register terminal-specific keybindings.
