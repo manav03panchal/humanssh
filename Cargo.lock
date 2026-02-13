@@ -2898,10 +2898,8 @@ version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
- "base64",
  "criterion",
  "dirs 5.0.1",
- "futures",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
@@ -2923,7 +2921,6 @@ dependencies = [
  "tempfile",
  "termwiz",
  "test-case",
- "thiserror 2.0.17",
  "tokio",
  "tokio-test",
  "toml 0.8.23",

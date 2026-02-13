@@ -33,11 +33,6 @@ use std::sync::Arc;
 /// When false, Option key is stripped from modifier set, allowing macOS to insert special characters.
 pub static OPTION_AS_ALT: AtomicBool = AtomicBool::new(true);
 
-/// Set whether the macOS Option key should be treated as Alt.
-pub fn set_option_as_alt(enabled: bool) {
-    OPTION_AS_ALT.store(enabled, Ordering::Relaxed);
-}
-
 // Import centralized configuration
 // FONT_FAMILY used in tests via super::*
 #[allow(unused_imports)]
@@ -2183,17 +2178,9 @@ impl Focusable for TerminalPane {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::assertions_on_constants,
-    clippy::const_is_empty,
-    clippy::absurd_extreme_comparisons,
-    clippy::unnecessary_cast,
-    clippy::unnecessary_literal_unwrap,
-    clippy::bind_instead_of_map
-)]
+#[allow(clippy::unnecessary_literal_unwrap)]
 mod tests {
     use super::*;
-    use alacritty_terminal::grid::Dimensions;
     use pretty_assertions::assert_eq;
     use test_case::test_case;
 
@@ -2258,12 +2245,6 @@ mod tests {
     }
 
     // ============================================================================
-    // Unit Tests for Pure Functions and Data Structures
-    // ============================================================================
-
-    // These tests don't require GPUI context and test pure functions/data types
-
-    // ============================================================================
     // Display State Tests (No GPUI required)
     // ============================================================================
 
@@ -2271,23 +2252,10 @@ mod tests {
     fn test_display_state_default() {
         let display = DisplayState::default();
 
-        // Check default terminal size (80x24 is standard)
         assert_eq!(display.size.cols, 80, "Default columns should be 80");
         assert_eq!(display.size.rows, 24, "Default rows should be 24");
-
-        // Check cell dimensions are reasonable
         assert!(display.cell_dims.0 > 0.0, "Cell width should be positive");
         assert!(display.cell_dims.1 > 0.0, "Cell height should be positive");
-
-        // Check font size is within valid range
-        assert!(
-            display.font_size >= MIN_FONT_SIZE,
-            "Font size should be >= MIN"
-        );
-        assert!(
-            display.font_size <= MAX_FONT_SIZE,
-            "Font size should be <= MAX"
-        );
         assert_eq!(
             display.font_size, DEFAULT_FONT_SIZE,
             "Font size should be default"
@@ -2306,49 +2274,9 @@ mod tests {
         assert_eq!(display.font_size, expected_size);
     }
 
-    #[::core::prelude::v1::test]
-    fn test_display_state_clone() {
-        let original = DisplayState {
-            font_size: 20.0,
-            size: TermSize {
-                cols: 100,
-                rows: 50,
-            },
-            cell_dims: (12.0, 24.0),
-            bounds: None,
-            cached_font_key: None,
-        };
-        let cloned = original.clone();
-
-        assert_eq!(original.font_size, cloned.font_size);
-        assert_eq!(original.size.cols, cloned.size.cols);
-        assert_eq!(original.size.rows, cloned.size.rows);
-        assert_eq!(original.cell_dims, cloned.cell_dims);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_display_state_bounds_none_initially() {
-        let display = DisplayState::default();
-        assert!(display.bounds.is_none(), "Bounds should be None initially");
-    }
-
     // ============================================================================
-    // MouseEscBuf Tests (Unit tests for the helper)
+    // MouseEscBuf SGR Format Test (pane-specific: tests coordinate offset logic)
     // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_creation() {
-        let buf = MouseEscBuf::new();
-        assert_eq!(buf.as_str(), "");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_write() {
-        let mut buf = MouseEscBuf::new();
-        use std::fmt::Write;
-        write!(buf, "\x1b[<0;10;20M").unwrap();
-        assert_eq!(buf.as_str(), "\x1b[<0;10;20M");
-    }
 
     #[::core::prelude::v1::test]
     fn test_mouse_esc_buf_sgr_format() {
@@ -2426,130 +2354,6 @@ mod tests {
         assert!(run.underline.is_some());
     }
 
-    // ============================================================================
-    // TermSize Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_term_size_default() {
-        let size = TermSize::default();
-        assert_eq!(size.cols, 80);
-        assert_eq!(size.rows, 24);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_term_size_dimensions_trait() {
-        use alacritty_terminal::grid::Dimensions;
-        let size = TermSize {
-            cols: 100,
-            rows: 50,
-        };
-        assert_eq!(size.columns(), 100);
-        assert_eq!(size.total_lines(), 50);
-        assert_eq!(size.screen_lines(), 50);
-    }
-
-    #[test_case(80, 24 ; "standard terminal")]
-    #[test_case(120, 40 ; "large terminal")]
-    #[test_case(40, 10 ; "small terminal")]
-    #[test_case(10, 3 ; "minimum terminal")]
-    fn test_term_size_various_dimensions(cols: u16, rows: u16) {
-        use alacritty_terminal::grid::Dimensions;
-        let size = TermSize { cols, rows };
-        assert_eq!(size.columns(), cols as usize);
-        assert_eq!(size.total_lines(), rows as usize);
-    }
-
-    // ============================================================================
-    // Font Size Constraint Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_min_constraint() {
-        let clamped = (5.0_f32).max(MIN_FONT_SIZE);
-        assert_eq!(clamped, MIN_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_max_constraint() {
-        let clamped = (100.0_f32).min(MAX_FONT_SIZE);
-        assert_eq!(clamped, MAX_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_within_range() {
-        let font_size = 16.0_f32;
-        let clamped = font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
-        assert_eq!(clamped, font_size);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_zoom_in_logic() {
-        let initial = DEFAULT_FONT_SIZE;
-        let zoomed = (initial + 1.0).min(MAX_FONT_SIZE);
-        assert!(zoomed > initial || zoomed == MAX_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_zoom_out_logic() {
-        let initial = DEFAULT_FONT_SIZE;
-        let zoomed = (initial - 1.0).max(MIN_FONT_SIZE);
-        assert!(zoomed < initial || zoomed == MIN_FONT_SIZE);
-    }
-
-    // ============================================================================
-    // Listener Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_listener_new() {
-        let listener = Listener::new();
-        assert!(listener.title.lock().is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_title_event() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-
-        // Send a title event
-        listener.send_event(alacritty_terminal::event::Event::Title(
-            "Test Title".to_string(),
-        ));
-
-        // Check the title was captured
-        let title = listener.title.lock();
-        assert_eq!(title.as_deref(), Some("Test Title"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_clone() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-        listener.send_event(alacritty_terminal::event::Event::Title(
-            "Original".to_string(),
-        ));
-
-        let cloned = listener.clone();
-
-        // Both should share the same Arc
-        assert_eq!(cloned.title.lock().as_deref(), Some("Original"));
-    }
-
-    // ============================================================================
-    // Text Run Style Flag Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_text_run_empty_flags() {
-        let font_family: SharedString = "Test".into();
-        let run = create_text_run(1, &font_family, Hsla::default(), CellFlags::empty());
-        assert_eq!(run.font.weight, FontWeight::NORMAL);
-        assert_eq!(run.font.style, FontStyle::Normal);
-        assert!(run.underline.is_none());
-        assert!(run.strikethrough.is_none());
-    }
-
     #[::core::prelude::v1::test]
     fn test_text_run_all_underline_variants() {
         let font_family: SharedString = "Test".into();
@@ -2579,353 +2383,11 @@ mod tests {
         assert!(underline.wavy, "Undercurl should have wavy=true");
     }
 
-    // ============================================================================
-    // Pixel to Cell Conversion Logic Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_pixel_to_cell_calculation() {
-        // Test the core conversion logic without bounds
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        // Position at (PADDING + 25, PADDING + 45)
-        let local_x = 25.0_f32;
-        let local_y = 45.0_f32;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
-
-        // With padding=2, local_x=25: (25-2)/10 = 2.3 -> floor = 2
-        // With padding=2, local_y=45: (45-2)/20 = 2.15 -> floor = 2
-        assert_eq!(cell_x, 2);
-        assert_eq!(cell_y, 2);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_pixel_to_cell_negative_result() {
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        // Position before padding
-        let local_x = 0.0_f32;
-        let local_y = 0.0_f32;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
-
-        // Should be negative
-        assert!(cell_x < 0);
-        assert!(cell_y < 0);
-    }
-
-    // ============================================================================
-    // Mouse Escape Buffer Edge Cases
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_max_coordinates() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-        // Maximum supported coordinates (255 for legacy, larger for SGR)
-        write!(buf, "\x1b[<0;255;255M").unwrap();
-        assert_eq!(buf.as_str(), "\x1b[<0;255;255M");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_all_buttons() {
-        use std::fmt::Write;
-
-        for button in [0, 1, 2, 64, 65] {
-            // Left, Middle, Right, WheelUp, WheelDown
-            let mut buf = MouseEscBuf::new();
-            write!(buf, "\x1b[<{};10;10M", button).unwrap();
-            assert!(buf.as_str().contains(&format!("{}", button)));
-        }
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_release_format() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-        // SGR release uses lowercase 'm'
-        write!(buf, "\x1b[<0;10;10m").unwrap();
-        assert!(buf.as_str().ends_with('m'));
-    }
-
-    // ============================================================================
-    // Config Constants Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_config_constants_valid() {
-        assert!(MIN_FONT_SIZE > 0.0, "MIN_FONT_SIZE should be positive");
-        assert!(MAX_FONT_SIZE > MIN_FONT_SIZE, "MAX should be > MIN");
-        assert!(
-            DEFAULT_FONT_SIZE >= MIN_FONT_SIZE,
-            "DEFAULT should be >= MIN"
-        );
-        assert!(
-            DEFAULT_FONT_SIZE <= MAX_FONT_SIZE,
-            "DEFAULT should be <= MAX"
-        );
-        assert!(PADDING >= 0.0, "PADDING should be non-negative");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_family_not_empty() {
-        assert!(!FONT_FAMILY.is_empty(), "Font family should not be empty");
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - Invalid Input Sequences
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_handles_invalid_utf8_sequence() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        // Valid escape sequence components
-        write!(buf, "\x1b[<0;1;1M").unwrap();
-
-        // Should be valid ASCII/UTF-8
-        assert!(buf.as_str().is_ascii());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_boundary_coordinates() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        // Test with maximum reasonable coordinates
-        write!(buf, "\x1b[<0;9999;9999M").unwrap();
-        assert_eq!(buf.as_str(), "\x1b[<0;9999;9999M");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_negative_coordinate_handling() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        // Format with u32::MAX which might indicate an error in coordinate calculation
-        // This tests that the buffer doesn't panic on large numbers
-        let large_num = u32::MAX;
-        let _ = write!(buf, "\x1b[<0;{};1M", large_num);
-        // Should truncate without panic
-        assert!(buf.as_str().len() <= 32);
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - Malformed Escape Sequences
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_incomplete() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        // Incomplete escape sequence (missing terminator)
-        write!(buf, "\x1b[<0;10;10").unwrap();
-        // Should still be valid string
-        assert!(buf.as_str().starts_with("\x1b"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_wrong_terminator() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        // Wrong terminator (Z instead of M or m)
-        write!(buf, "\x1b[<0;10;10Z").unwrap();
-        assert_eq!(buf.as_str(), "\x1b[<0;10;10Z");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_extra_semicolons() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        // Extra semicolons in sequence
-        write!(buf, "\x1b[<0;;10;10M").unwrap();
-        assert!(buf.as_str().contains(";;"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_missing_bracket() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        // Missing bracket in sequence
-        write!(buf, "\x1b<0;10;10M").unwrap();
-        assert!(!buf.as_str().contains("["));
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - Zero-Size Terminal Handling
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_term_size_zero_dimensions() {
-        let size = TermSize { cols: 0, rows: 0 };
-        // Should not panic, just return 0
-        assert_eq!(size.columns(), 0);
-        assert_eq!(size.total_lines(), 0);
-        assert_eq!(size.screen_lines(), 0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_display_state_zero_cell_dims() {
-        let state = DisplayState {
-            size: TermSize::default(),
-            cell_dims: (0.0, 0.0),
-            bounds: None,
-            font_size: DEFAULT_FONT_SIZE,
-            cached_font_key: None,
-        };
-
-        // Zero cell dimensions shouldn't cause panic
-        assert_eq!(state.cell_dims.0, 0.0);
-        assert_eq!(state.cell_dims.1, 0.0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_pixel_to_cell_calculation_zero_cell_size() {
-        // Simulate pixel to cell conversion with zero cell dimensions
-        let cell_width = 0.0_f32;
-        let cell_height = 0.0_f32;
-        let padding = PADDING;
-
-        let local_x = 100.0_f32;
-        let local_y = 100.0_f32;
-
-        // This would cause division by zero or inf
-        let cell_x = if cell_width > 0.0 {
-            ((local_x - padding) / cell_width).floor() as i32
-        } else {
-            0 // Safe fallback
-        };
-
-        let cell_y = if cell_height > 0.0 {
-            ((local_y - padding) / cell_height).floor() as i32
-        } else {
-            0 // Safe fallback
-        };
-
-        assert_eq!(cell_x, 0);
-        assert_eq!(cell_y, 0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_term_size_single_cell() {
-        let size = TermSize { cols: 1, rows: 1 };
-        assert_eq!(size.columns(), 1);
-        assert_eq!(size.total_lines(), 1);
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - Font Size at Limits
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_at_minimum() {
-        let state = DisplayState {
-            font_size: MIN_FONT_SIZE,
-            ..Default::default()
-        };
-
-        assert_eq!(state.font_size, MIN_FONT_SIZE);
-        // Further reduction should be clamped
-        let reduced = (state.font_size - 1.0).max(MIN_FONT_SIZE);
-        assert_eq!(reduced, MIN_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_at_maximum() {
-        let state = DisplayState {
-            font_size: MAX_FONT_SIZE,
-            ..Default::default()
-        };
-
-        assert_eq!(state.font_size, MAX_FONT_SIZE);
-        // Further increase should be clamped
-        let increased = (state.font_size + 1.0).min(MAX_FONT_SIZE);
-        assert_eq!(increased, MAX_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_below_minimum_clamps() {
-        let too_small = MIN_FONT_SIZE - 100.0;
-        let clamped = too_small.max(MIN_FONT_SIZE);
-        assert_eq!(clamped, MIN_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_above_maximum_clamps() {
-        let too_large = MAX_FONT_SIZE + 100.0;
-        let clamped = too_large.min(MAX_FONT_SIZE);
-        assert_eq!(clamped, MAX_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_negative_clamps_to_minimum() {
-        let negative = -10.0_f32;
-        let clamped = negative.max(MIN_FONT_SIZE);
-        assert_eq!(clamped, MIN_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_infinity_clamps_to_maximum() {
-        let inf = f32::INFINITY;
-        let clamped = inf.min(MAX_FONT_SIZE);
-        assert_eq!(clamped, MAX_FONT_SIZE);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_font_size_nan_handling() {
-        let nan = f32::NAN;
-        // NaN comparisons always return false, so max/min with NaN gives the other value
-        // This is important for defensive programming
-        let result_max = nan.max(MIN_FONT_SIZE);
-        let result_min = nan.min(MAX_FONT_SIZE);
-
-        // With NaN, we need to check for NaN explicitly
-        assert!(result_max.is_nan() || result_max >= MIN_FONT_SIZE);
-        assert!(result_min.is_nan() || result_min <= MAX_FONT_SIZE);
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - Text Run Creation Edge Cases
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_zero_length() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        let run = create_text_run(0, &font_family, fg, CellFlags::empty());
-
-        // Zero length run should be valid
-        assert_eq!(run.len, 0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_max_length() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        // Very large length (theoretical max line length)
-        let run = create_text_run(usize::MAX, &font_family, fg, CellFlags::empty());
-
-        assert_eq!(run.len, usize::MAX);
-    }
-
     #[::core::prelude::v1::test]
     fn test_create_text_run_all_flags_combined() {
         let font_family: SharedString = "Test Font".into();
         let fg = Hsla::default();
 
-        // Combine all possible flags
         let all_flags = CellFlags::BOLD
             | CellFlags::ITALIC
             | CellFlags::UNDERLINE
@@ -2936,7 +2398,6 @@ mod tests {
 
         let run = create_text_run(5, &font_family, fg, all_flags);
 
-        // Should have bold and italic applied
         assert_eq!(run.font.weight, FontWeight::BOLD);
         assert_eq!(run.font.style, FontStyle::Italic);
         assert!(run.underline.is_some());
@@ -2944,15 +2405,45 @@ mod tests {
     }
 
     // ============================================================================
-    // ERROR PATH TESTS - Listener Edge Cases
+    // Listener Tests
     // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_listener_new() {
+        let listener = Listener::new();
+        assert!(listener.title.lock().is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_title_event() {
+        use alacritty_terminal::event::EventListener;
+        let listener = Listener::new();
+
+        listener.send_event(alacritty_terminal::event::Event::Title(
+            "Test Title".to_string(),
+        ));
+
+        let title = listener.title.lock();
+        assert_eq!(title.as_deref(), Some("Test Title"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_clone() {
+        use alacritty_terminal::event::EventListener;
+        let listener = Listener::new();
+        listener.send_event(alacritty_terminal::event::Event::Title(
+            "Original".to_string(),
+        ));
+
+        let cloned = listener.clone();
+        assert_eq!(cloned.title.lock().as_deref(), Some("Original"));
+    }
 
     #[::core::prelude::v1::test]
     fn test_listener_empty_title() {
         use alacritty_terminal::event::EventListener;
         let listener = Listener::new();
 
-        // Send empty title
         listener.send_event(alacritty_terminal::event::Event::Title(String::new()));
 
         let title = listener.title.lock();
@@ -2964,7 +2455,6 @@ mod tests {
         use alacritty_terminal::event::EventListener;
         let listener = Listener::new();
 
-        // Very long title (potential buffer overflow in bad implementations)
         let long_title = "A".repeat(10000);
         listener.send_event(alacritty_terminal::event::Event::Title(long_title.clone()));
 
@@ -2977,7 +2467,6 @@ mod tests {
         use alacritty_terminal::event::EventListener;
         let listener = Listener::new();
 
-        // Unicode title with emojis and special characters
         let unicode_title = "Terminal \u{1F600} \u{4E2D}\u{6587} \u{0414}\u{0440}\u{0443}\u{0433}";
         listener.send_event(alacritty_terminal::event::Event::Title(
             unicode_title.to_string(),
@@ -2992,11 +2481,9 @@ mod tests {
         use alacritty_terminal::event::EventListener;
         let listener = Listener::new();
 
-        // Set initial title
         listener.send_event(alacritty_terminal::event::Event::Title("First".to_string()));
         assert_eq!(listener.title.lock().as_deref(), Some("First"));
 
-        // Overwrite with new title
         listener.send_event(alacritty_terminal::event::Event::Title(
             "Second".to_string(),
         ));
@@ -3004,71 +2491,157 @@ mod tests {
     }
 
     // ============================================================================
-    // ERROR PATH TESTS - Cell Dimension Calculations
+    // Pixel to Cell Conversion Logic Tests
     // ============================================================================
 
     #[::core::prelude::v1::test]
-    fn test_cell_dims_extreme_values() {
-        // Test with extreme but valid cell dimensions
-        let state = DisplayState {
-            cell_dims: (f32::MAX / 2.0, f32::MAX / 2.0),
-            ..Default::default()
-        };
-
-        // Should not overflow
-        assert!(state.cell_dims.0.is_finite());
-        assert!(state.cell_dims.1.is_finite());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_cell_dims_very_small() {
-        let state = DisplayState {
-            cell_dims: (0.001, 0.001),
-            ..Default::default()
-        };
-
-        // Very small but positive should work
-        assert!(state.cell_dims.0 > 0.0);
-        assert!(state.cell_dims.1 > 0.0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_terminal_size_calculation_prevents_overflow() {
-        // Simulate bounds calculation that could overflow
-        let bounds_width = 10000.0_f32;
-        let bounds_height = 10000.0_f32;
-        let cell_width = 0.01_f32; // Very small cells
-        let cell_height = 0.01_f32;
+    fn test_pixel_to_cell_calculation() {
+        let cell_width = 10.0_f32;
+        let cell_height = 20.0_f32;
         let padding = PADDING;
 
-        // This calculation could result in very large values
-        let cols = ((bounds_width - padding * 2.0).max(0.0) / cell_width).floor() as u16;
-        let rows = ((bounds_height - padding * 2.0).max(0.0) / cell_height).floor() as u16;
+        let local_x = 25.0_f32;
+        let local_y = 45.0_f32;
 
-        // Verify they're reasonable (clamped by u16::MAX)
-        assert!(cols <= u16::MAX);
-        assert!(rows <= u16::MAX);
+        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
+        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
+
+        assert_eq!(cell_x, 2);
+        assert_eq!(cell_y, 2);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_pixel_to_cell_negative_result() {
+        let cell_width = 10.0_f32;
+        let cell_height = 20.0_f32;
+        let padding = PADDING;
+
+        let local_x = 0.0_f32;
+        let local_y = 0.0_f32;
+
+        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
+        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
+
+        assert!(cell_x < 0);
+        assert!(cell_y < 0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_pixel_to_cell_calculation_zero_cell_size() {
+        let cell_width = 0.0_f32;
+        let cell_height = 0.0_f32;
+
+        let cell_x = if cell_width > 0.0 {
+            ((100.0_f32 - PADDING) / cell_width).floor() as i32
+        } else {
+            0
+        };
+
+        let cell_y = if cell_height > 0.0 {
+            ((100.0_f32 - PADDING) / cell_height).floor() as i32
+        } else {
+            0
+        };
+
+        assert_eq!(cell_x, 0);
+        assert_eq!(cell_y, 0);
     }
 
     // ============================================================================
-    // ERROR PATH TESTS - Bounds Handling
+    // Mouse Escape Buffer Edge Cases (pane-specific: all buttons, release format)
     // ============================================================================
 
     #[::core::prelude::v1::test]
-    fn test_display_state_none_bounds() {
-        let state = DisplayState::default();
+    fn test_mouse_esc_buf_all_buttons() {
+        use std::fmt::Write;
 
-        // Bounds should be None initially
-        assert!(state.bounds.is_none());
-
-        // Pattern matching on None should work
-        if let Some(_bounds) = &state.bounds {
-            panic!("Bounds should be None");
+        for button in [0, 1, 2, 64, 65] {
+            let mut buf = MouseEscBuf::new();
+            write!(buf, "\x1b[<{};10;10M", button).unwrap();
+            assert!(buf.as_str().contains(&format!("{}", button)));
         }
     }
 
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_release_format() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+        write!(buf, "\x1b[<0;10;10m").unwrap();
+        assert!(buf.as_str().ends_with('m'));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_mouse_esc_buf_negative_coordinate_handling() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+
+        let large_num = u32::MAX;
+        let _ = write!(buf, "\x1b[<0;{};1M", large_num);
+        assert!(buf.as_str().len() <= 32);
+    }
+
     // ============================================================================
-    // ERROR PATH TESTS - Mouse Event Coordinate Edge Cases
+    // Malformed Escape Sequences
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_escape_sequence_incomplete() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+
+        write!(buf, "\x1b[<0;10;10").unwrap();
+        assert!(buf.as_str().starts_with("\x1b"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_escape_sequence_wrong_terminator() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+
+        write!(buf, "\x1b[<0;10;10Z").unwrap();
+        assert_eq!(buf.as_str(), "\x1b[<0;10;10Z");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_escape_sequence_extra_semicolons() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+
+        write!(buf, "\x1b[<0;;10;10M").unwrap();
+        assert!(buf.as_str().contains(";;"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_escape_sequence_missing_bracket() {
+        use std::fmt::Write;
+        let mut buf = MouseEscBuf::new();
+
+        write!(buf, "\x1b<0;10;10M").unwrap();
+        assert!(!buf.as_str().contains("["));
+    }
+
+    // ============================================================================
+    // Terminal Size Calculation Overflow Test
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_terminal_size_calculation_prevents_overflow() {
+        let bounds_width = 10000.0_f32;
+        let bounds_height = 10000.0_f32;
+        let cell_width = 0.01_f32;
+        let cell_height = 0.01_f32;
+        let padding = PADDING;
+
+        let cols = ((bounds_width - padding * 2.0).max(0.0) / cell_width).floor() as u16;
+        let rows = ((bounds_height - padding * 2.0).max(0.0) / cell_height).floor() as u16;
+
+        // Verify we got large values (saturates at u16::MAX)
+        assert!(cols > 0);
+        assert!(rows > 0);
+    }
+
+    // ============================================================================
+    // Mouse Event Coordinate Edge Cases
     // ============================================================================
 
     #[::core::prelude::v1::test]
@@ -3077,33 +2650,11 @@ mod tests {
         let cell_height = 20.0_f32;
         let padding = PADDING;
 
-        // Position exactly at padding boundary
-        let local_x = padding;
-        let local_y = padding;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
+        let cell_x = ((padding - padding) / cell_width).floor() as i32;
+        let cell_y = ((padding - padding) / cell_height).floor() as i32;
 
         assert_eq!(cell_x, 0);
         assert_eq!(cell_y, 0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_coordinate_just_before_origin() {
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        // Position just before padding boundary
-        let local_x = padding - 0.001;
-        let local_y = padding - 0.001;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
-
-        // Should be negative (before terminal area)
-        assert!(cell_x < 0);
-        assert!(cell_y < 0);
     }
 
     #[::core::prelude::v1::test]
@@ -3114,15 +2665,14 @@ mod tests {
         let cell_height = 20.0_f32;
         let padding = PADDING;
 
-        // Position at last cell
         let local_x = padding + (cols as f32 - 0.5) * cell_width;
         let local_y = padding + (rows as f32 - 0.5) * cell_height;
 
         let cell_x = ((local_x - padding) / cell_width).floor() as i32;
         let cell_y = ((local_y - padding) / cell_height).floor() as i32;
 
-        assert_eq!(cell_x, (cols - 1) as i32);
-        assert_eq!(cell_y, (rows - 1) as i32);
+        assert_eq!(cell_x, cols - 1);
+        assert_eq!(cell_y, rows - 1);
     }
 
     #[::core::prelude::v1::test]
@@ -3133,78 +2683,26 @@ mod tests {
         let cell_height = 20.0_f32;
         let padding = PADDING;
 
-        // Position past terminal bounds
         let local_x = padding + (cols as f32 + 10.0) * cell_width;
         let local_y = padding + (rows as f32 + 10.0) * cell_height;
 
         let cell_x = ((local_x - padding) / cell_width).floor() as i32;
         let cell_y = ((local_y - padding) / cell_height).floor() as i32;
 
-        // Should be past bounds
-        assert!(cell_x >= cols as i32);
-        assert!(cell_y >= rows as i32);
+        assert!(cell_x >= cols);
+        assert!(cell_y >= rows);
     }
 
     // ============================================================================
-    // PANIC TESTS - Using #[should_panic]
+    // Wide Character Placeholder Test
     // ============================================================================
-
-    #[::core::prelude::v1::test]
-    #[should_panic(expected = "called `Option::unwrap()` on a `None` value")]
-    fn test_bounds_unwrap_on_none_panics() {
-        let state = DisplayState::default();
-        state.bounds.unwrap(); // Should panic
-    }
-
-    #[::core::prelude::v1::test]
-    #[should_panic]
-    fn test_division_by_zero_panics() {
-        // Use std::hint::black_box to prevent compile-time evaluation
-        let zero = std::hint::black_box(0_u32);
-        let _ = 1_u32 / zero;
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - RenderCell Edge Cases
-    // ============================================================================
-
-    #[test_case('\0' ; "null character")]
-    #[test_case('\x1b' ; "escape character")]
-    #[test_case('\x7f' ; "delete character")]
-    #[test_case('\r' ; "carriage return")]
-    #[test_case('\n' ; "newline")]
-    fn test_render_cell_control_characters(c: char) {
-        let cell = RenderCell {
-            row: 0,
-            col: 0,
-            c,
-            fg: Hsla::default(),
-            flags: CellFlags::empty(),
-        };
-        assert_eq!(cell.c, c);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_render_cell_max_position() {
-        let cell = RenderCell {
-            row: usize::MAX,
-            col: usize::MAX,
-            c: 'X',
-            fg: Hsla::default(),
-            flags: CellFlags::empty(),
-        };
-
-        assert_eq!(cell.row, usize::MAX);
-        assert_eq!(cell.col, usize::MAX);
-    }
 
     #[::core::prelude::v1::test]
     fn test_render_cell_wide_character_placeholder() {
-        // Wide character spacer (second cell of a wide char)
         let cell = RenderCell {
             row: 0,
-            col: 1, // Second cell position
-            c: ' ', // Spacer character
+            col: 1,
+            c: ' ',
             fg: Hsla::default(),
             flags: CellFlags::WIDE_CHAR_SPACER,
         };
@@ -3213,26 +2711,11 @@ mod tests {
     }
 
     // ============================================================================
-    // ERROR PATH TESTS - BgRegion Edge Cases
+    // BgRegion Edge Cases (pane-specific: inverted columns with saturating_sub)
     // ============================================================================
 
     #[::core::prelude::v1::test]
-    fn test_bg_region_col_start_equals_col_end() {
-        // Zero-width region
-        let region = BgRegion {
-            row: 0,
-            col_start: 10,
-            col_end: 10, // Same as start
-            color: Hsla::default(),
-        };
-
-        let width = region.col_end - region.col_start;
-        assert_eq!(width, 0);
-    }
-
-    #[::core::prelude::v1::test]
     fn test_bg_region_inverted_columns() {
-        // Inverted region (col_end < col_start) - shouldn't happen but test handling
         let region = BgRegion {
             row: 0,
             col_start: 20,
@@ -3240,40 +2723,13 @@ mod tests {
             color: Hsla::default(),
         };
 
-        // Using saturating_sub to avoid underflow
         let width = region.col_end.saturating_sub(region.col_start);
         assert_eq!(width, 0);
     }
 
-    #[::core::prelude::v1::test]
-    fn test_bg_region_full_line() {
-        let region = BgRegion {
-            row: 0,
-            col_start: 0,
-            col_end: 80, // Full 80-column line
-            color: Hsla::default(),
-        };
-
-        let width = region.col_end - region.col_start;
-        assert_eq!(width, 80);
-    }
-
     // ============================================================================
-    // ERROR PATH TESTS - CursorInfo Edge Cases
+    // CursorInfo Edge Cases (pane-specific: Hidden and HollowBlock shapes)
     // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_cursor_info_at_origin() {
-        let cursor = CursorInfo {
-            row: 0,
-            col: 0,
-            shape: CursorShape::Block,
-            color: Hsla::default(),
-        };
-
-        assert_eq!(cursor.row, 0);
-        assert_eq!(cursor.col, 0);
-    }
 
     #[::core::prelude::v1::test]
     fn test_cursor_info_hidden_shape() {
@@ -3297,132 +2753,6 @@ mod tests {
         };
 
         assert!(matches!(cursor.shape, CursorShape::HollowBlock));
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - RenderData Edge Cases
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_render_data_large_cell_count() {
-        // Large number of cells (stress test memory)
-        let cells: Vec<RenderCell> = (0..10000)
-            .map(|i| RenderCell {
-                row: i / 100,
-                col: i % 100,
-                c: 'X',
-                fg: Hsla::default(),
-                flags: CellFlags::empty(),
-            })
-            .collect();
-
-        let data = RenderData {
-            cells,
-            bg_regions: Vec::new(),
-            cursor: None,
-        };
-
-        assert_eq!(data.cells.len(), 10000);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_render_data_many_bg_regions() {
-        // Many background regions
-        let bg_regions: Vec<BgRegion> = (0..1000)
-            .map(|i| BgRegion {
-                row: i,
-                col_start: 0,
-                col_end: 80,
-                color: Hsla::default(),
-            })
-            .collect();
-
-        let data = RenderData {
-            cells: Vec::new(),
-            bg_regions,
-            cursor: None,
-        };
-
-        assert_eq!(data.bg_regions.len(), 1000);
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - Result and Option Assertions
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_option_map_on_none() {
-        let bounds: Option<gpui::Bounds<gpui::Pixels>> = None;
-
-        // map on None should return None
-        let result = bounds.map(|b| b.origin);
-        assert!(result.is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_option_unwrap_or_default() {
-        let title: Option<String> = None;
-
-        // unwrap_or_default should return empty string
-        let result = title.unwrap_or_default();
-        assert_eq!(result, "");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_option_and_then_chain() {
-        let state = DisplayState::default();
-
-        // Chained operations on None bounds
-        let result = state
-            .bounds
-            .as_ref()
-            .and_then(|b| Some(b.origin.x))
-            .unwrap_or_default();
-
-        // Should return default Pixels value
-        assert_eq!(result, gpui::Pixels::default());
-    }
-
-    // ============================================================================
-    // ERROR PATH TESTS - Float Edge Cases
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_float_infinity_in_dimensions() {
-        let inf = f32::INFINITY;
-
-        // Clamping infinity should give valid results
-        let clamped = inf.min(1000.0);
-        assert_eq!(clamped, 1000.0);
-
-        let neg_inf = f32::NEG_INFINITY;
-        let clamped_neg = neg_inf.max(0.0);
-        assert_eq!(clamped_neg, 0.0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_float_operations_with_zero() {
-        let width = 0.0_f32;
-        let padding = PADDING;
-
-        // Division by zero produces infinity
-        let result = if width != 0.0 {
-            (100.0 - padding) / width
-        } else {
-            0.0 // Safe default
-        };
-
-        assert_eq!(result, 0.0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_floor_on_negative() {
-        // floor on negative should round toward negative infinity
-        let neg = -0.5_f32;
-        assert_eq!(neg.floor(), -1.0);
-
-        let neg2 = -1.9_f32;
-        assert_eq!(neg2.floor(), -2.0);
     }
 
     // ========================================================================
@@ -3471,21 +2801,18 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn test_find_url_strips_trailing_punctuation() {
-        // Period at end
         let line = "Check https://example.com.";
         assert_eq!(
             TerminalPane::find_url_at_position(line, 10),
             Some("https://example.com".to_string())
         );
 
-        // Comma at end
         let line = "See https://example.com, then continue";
         assert_eq!(
             TerminalPane::find_url_at_position(line, 10),
             Some("https://example.com".to_string())
         );
 
-        // Closing paren at end (common in markdown)
         let line = "(https://example.com)";
         assert_eq!(
             TerminalPane::find_url_at_position(line, 5),
@@ -3502,21 +2829,17 @@ mod tests {
     #[::core::prelude::v1::test]
     fn test_find_url_click_outside_url() {
         let line = "Before https://example.com after";
-        // Click on "Before"
         assert_eq!(TerminalPane::find_url_at_position(line, 0), None);
-        // Click on "after"
         assert_eq!(TerminalPane::find_url_at_position(line, 28), None);
     }
 
     #[::core::prelude::v1::test]
     fn test_find_url_multiple_urls() {
         let line = "First https://a.com then https://b.com end";
-        // Click on first URL
         assert_eq!(
             TerminalPane::find_url_at_position(line, 8),
             Some("https://a.com".to_string())
         );
-        // Click on second URL
         assert_eq!(
             TerminalPane::find_url_at_position(line, 28),
             Some("https://b.com".to_string())
@@ -3543,9 +2866,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn test_find_url_with_unicode_before() {
-        // Emoji before URL (multi-byte character)
-        let line = "🚀 Check http://localhost:4321/ for updates";
-        // The emoji takes 1 character position, so URL starts at char 9
+        let line = "\u{1F680} Check http://localhost:4321/ for updates";
         assert_eq!(
             TerminalPane::find_url_at_position(line, 9),
             Some("http://localhost:4321/".to_string())
@@ -3558,8 +2879,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn test_find_url_with_ansi_prompt() {
-        // Simulate a prompt line with URL
-        let line = "~/projects ➜ http://localhost:8080/api";
+        let line = "~/projects \u{279C} http://localhost:8080/api";
         assert_eq!(
             TerminalPane::find_url_at_position(line, 15),
             Some("http://localhost:8080/api".to_string())

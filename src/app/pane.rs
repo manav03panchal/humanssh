@@ -1,8 +1,8 @@
 //! Pane abstraction for extensible pane types.
 //!
-//! This module defines the `Pane` trait and `PaneKind` enum that allow
-//! different pane types (terminal, SSH, file browser, etc.) to be used
-//! interchangeably in the workspace.
+//! This module defines the `PaneKind` enum that allows different pane types
+//! (terminal, SSH, file browser, etc.) to be used interchangeably in the
+//! workspace.
 //!
 //! # Architecture
 //!
@@ -18,7 +18,7 @@
 //!
 //! # Design Decisions
 //!
-//! We use enum dispatch instead of trait objects (`dyn Pane`) because:
+//! We use enum dispatch instead of trait objects because:
 //! 1. GPUI's `Entity<T>` doesn't support `Entity<dyn Trait>` directly
 //! 2. Enum dispatch is more idiomatic Rust and avoids vtable overhead
 //! 3. Adding new pane types is explicit and compile-time checked
@@ -26,39 +26,6 @@
 
 use crate::terminal::TerminalPane;
 use gpui::{AnyElement, App, Entity, FocusHandle, IntoElement, SharedString, Window};
-
-/// Common behavior for all pane types.
-///
-/// This trait defines the contract that all panes must fulfill.
-/// It's primarily used for documentation; actual dispatch happens
-/// via the `PaneKind` enum for GPUI compatibility.
-#[allow(dead_code)] // Trait serves as documentation/contract for future pane types
-pub trait Pane {
-    /// Check if the pane has any running child processes.
-    ///
-    /// Used to show confirmation dialogs before closing.
-    fn has_running_processes(&self) -> bool;
-
-    /// Get the name of the running foreground process, if any.
-    ///
-    /// Used in confirmation dialog messages.
-    fn get_running_process_name(&self) -> Option<String>;
-
-    /// Check if the pane's underlying process has exited.
-    ///
-    /// Used for automatic cleanup of dead panes.
-    fn has_exited(&self) -> bool;
-
-    /// Get the pane's display title.
-    ///
-    /// Returns `None` if no title has been set (fall back to default).
-    fn title(&self) -> Option<SharedString>;
-
-    /// Get the focus handle for this pane.
-    ///
-    /// Required for GPUI focus management.
-    fn focus_handle(&self) -> FocusHandle;
-}
 
 /// Type-safe enum for different pane types.
 ///

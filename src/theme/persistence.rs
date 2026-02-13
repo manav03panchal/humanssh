@@ -1,6 +1,6 @@
 //! Legacy persistence types.
 //!
-//! Contains platform-specific enums still referenced by actions.
+//! Contains platform-specific enums still referenced by terminal subsystem.
 //! Settings persistence has moved to `config::file` (TOML config).
 
 use serde::{Deserialize, Serialize};
@@ -12,12 +12,4 @@ pub enum WindowsShell {
     PowerShell,
     PowerShellCore,
     Cmd,
-}
-
-/// Window decoration style for Linux.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-pub enum LinuxDecorations {
-    #[default]
-    Server,
-    Client,
 }

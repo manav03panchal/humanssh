@@ -4,32 +4,15 @@
 //!
 //! # Modules
 //!
-//! - `persistence` - Settings loading/saving with validation
+//! - `persistence` - Platform-specific types (WindowsShell)
 //! - `colors` - Terminal color mapping from theme
-//! - `actions` - Theme switching actions
-//!
-//! # Usage
-//!
-//! ```ignore
-//! // Get terminal colors for rendering
-//! let colors = terminal_colors(cx);
-//! let bg = colors.background;
-//! let fg = colors.foreground;
-//!
-//! // Switch theme via action
-//! cx.dispatch_action(Box::new(SwitchTheme("Catppuccin Latte".into())));
-//! ```
+//! - `actions` - Action handlers (secure input, option-as-alt)
 
 mod actions;
 mod colors;
 mod persistence;
 
 // Re-export public API
-#[cfg(target_os = "linux")]
-pub use actions::SwitchDecorations;
-#[cfg(target_os = "windows")]
-pub use actions::SwitchShell;
-pub use actions::{SwitchFont, SwitchTheme, SwitchThemeMode};
 pub use colors::{terminal_colors, TerminalColors};
 
 use gpui::App;
@@ -103,7 +86,7 @@ pub fn init(cx: &mut App) {
         tracing::warn!("Themes directory not found, using default theme");
     }
 
-    // Watch for theme changes — restore font after apply_config calls
+    // Watch for theme changes -- restore font after apply_config calls
     cx.observe_global::<Theme>(|cx| {
         let themes_empty = ThemeRegistry::global(cx).themes().is_empty();
         if themes_empty {
@@ -125,7 +108,7 @@ pub fn init(cx: &mut App) {
         Box::leak(Box::new(debouncer));
     }
 
-    // Register theme switching actions (still needed for internal use)
+    // Register action handlers
     actions::register_actions(cx);
 }
 
@@ -183,52 +166,16 @@ fn find_themes_dir() -> Option<PathBuf> {
 }
 
 #[cfg(test)]
-#[allow(clippy::clone_on_copy)]
 mod tests {
-    use super::{
-        find_themes_dir, terminal_colors, SwitchFont, SwitchTheme, SwitchThemeMode, TerminalColors,
-        Theme, ThemeRegistry,
-    };
+    use super::{find_themes_dir, TerminalColors};
     use tempfile::TempDir;
-
-    mod public_api {
-        use super::{terminal_colors, SwitchFont, SwitchTheme, SwitchThemeMode, TerminalColors};
-
-        #[test]
-        fn re_exports_switch_theme_action() {
-            let action = SwitchTheme("Test Theme".into());
-            assert_eq!(action.0.as_ref(), "Test Theme");
-        }
-
-        #[test]
-        fn re_exports_switch_font_action() {
-            let action = SwitchFont("Test Font".into());
-            assert_eq!(action.0.as_ref(), "Test Font");
-        }
-
-        #[test]
-        fn re_exports_switch_theme_mode_action() {
-            use gpui_component::theme::ThemeMode;
-            let action = SwitchThemeMode(ThemeMode::Dark);
-            assert_eq!(action.0, ThemeMode::Dark);
-        }
-
-        #[test]
-        fn re_exports_terminal_colors_function() {
-            let _: fn(&gpui::App) -> TerminalColors = terminal_colors;
-        }
-    }
 
     mod find_themes_dir {
         use super::{find_themes_dir, TempDir};
 
         #[test]
         fn returns_none_when_no_themes_dir_exists() {
-            // In a clean environment without themes/, should return None
-            // This test depends on the current working directory not having a themes folder
-            // We can't reliably test this without changing CWD, so we just verify the function exists
             let result = find_themes_dir();
-            // Result may be Some or None depending on environment
             if let Some(path) = result {
                 assert!(
                     path.is_dir(),
@@ -241,11 +188,9 @@ mod tests {
         fn validates_themes_dir_is_directory() {
             let temp_dir = TempDir::new().unwrap();
 
-            // Create a file called "themes" (not a directory)
             let themes_file = temp_dir.path().join("themes");
             std::fs::write(&themes_file, "not a directory").unwrap();
 
-            // The validate_themes_dir helper should reject files
             let canonical = themes_file.canonicalize();
             if let Ok(path) = canonical {
                 assert!(!path.is_dir());
@@ -258,7 +203,6 @@ mod tests {
             let themes_dir = temp_dir.path().join("themes");
             std::fs::create_dir_all(&themes_dir).unwrap();
 
-            // Canonicalize should resolve to absolute path
             let canonical = themes_dir.canonicalize().unwrap();
             assert!(canonical.is_absolute());
             assert!(canonical.is_dir());
@@ -288,20 +232,6 @@ mod tests {
         }
     }
 
-    mod theme_registry_operations {
-        use super::{Theme, ThemeRegistry};
-
-        #[test]
-        fn theme_registry_type_exists() {
-            let _: &dyn Fn(&gpui::App) -> &ThemeRegistry = &ThemeRegistry::global;
-        }
-
-        #[test]
-        fn theme_type_exists() {
-            let _: &dyn Fn(&gpui::App) -> &Theme = &Theme::global;
-        }
-    }
-
     mod path_security {
         use super::TempDir;
 
@@ -309,17 +239,14 @@ mod tests {
         fn canonicalize_resolves_symlinks() {
             let temp_dir = TempDir::new().unwrap();
 
-            // Create actual themes directory
             let real_themes = temp_dir.path().join("real_themes");
             std::fs::create_dir_all(&real_themes).unwrap();
 
-            // Create symlink to themes directory (Unix only)
             #[cfg(unix)]
             {
                 let symlink_path = temp_dir.path().join("themes_link");
                 std::os::unix::fs::symlink(&real_themes, &symlink_path).unwrap();
 
-                // Canonicalize should resolve to the real path
                 let canonical = symlink_path.canonicalize().unwrap();
                 assert_eq!(
                     canonical,
@@ -336,7 +263,6 @@ mod tests {
 
             std::fs::create_dir_all(temp_dir.path().join("themes")).unwrap();
 
-            // The path with .. should resolve to the same place
             if themes_dir.exists() {
                 let canonical = themes_dir.canonicalize().unwrap();
                 assert!(!canonical.to_string_lossy().contains(".."));
@@ -347,50 +273,11 @@ mod tests {
         fn rejects_non_directory_themes_path() {
             let temp_dir = TempDir::new().unwrap();
 
-            // Create a file called "themes"
             let themes_file = temp_dir.path().join("themes");
             std::fs::write(&themes_file, "I am a file, not a directory").unwrap();
 
-            // Should be a file, not a directory
             assert!(themes_file.is_file());
             assert!(!themes_file.is_dir());
-        }
-    }
-
-    mod light_dark_mode {
-        use gpui_component::theme::ThemeMode;
-
-        #[test]
-        fn theme_mode_has_dark_variant() {
-            let mode = ThemeMode::Dark;
-            assert_eq!(mode, ThemeMode::Dark);
-        }
-
-        #[test]
-        fn theme_mode_has_light_variant() {
-            let mode = ThemeMode::Light;
-            assert_eq!(mode, ThemeMode::Light);
-        }
-
-        #[test]
-        fn theme_mode_is_copy() {
-            let mode = ThemeMode::Dark;
-            let copied = mode;
-            assert_eq!(mode, copied);
-        }
-
-        #[test]
-        fn theme_mode_is_clone() {
-            let mode = ThemeMode::Light;
-            let cloned = mode.clone();
-            assert_eq!(mode, cloned);
-        }
-
-        #[test]
-        fn theme_mode_equality() {
-            assert_eq!(ThemeMode::Dark, ThemeMode::Dark);
-            assert_eq!(ThemeMode::Light, ThemeMode::Light);
-            assert_ne!(ThemeMode::Dark, ThemeMode::Light);
         }
     }
 }

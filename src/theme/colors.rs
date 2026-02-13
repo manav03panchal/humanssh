@@ -134,7 +134,6 @@ pub fn terminal_colors(cx: &App) -> TerminalColors {
 }
 
 #[cfg(test)]
-#[allow(clippy::clone_on_copy)]
 mod tests {
     use super::{rgb, Hsla, TerminalColors, TERMINAL_COLORS_CACHE};
 
@@ -260,23 +259,6 @@ mod tests {
                 "foreground lightness {} should be > 0.7 for readable text",
                 colors.foreground.l
             );
-        }
-
-        #[test]
-        fn colors_are_copy() {
-            let colors = TerminalColors::default();
-            let colors_copy = colors;
-            // Both should be usable after copy
-            assert_eq!(colors.background.h, colors_copy.background.h);
-            assert_eq!(colors.foreground.h, colors_copy.foreground.h);
-        }
-
-        #[test]
-        fn colors_are_clone() {
-            let colors = TerminalColors::default();
-            let colors_clone = colors.clone();
-            assert_eq!(colors.background.h, colors_clone.background.h);
-            assert_eq!(colors.foreground.h, colors_clone.foreground.h);
         }
     }
 

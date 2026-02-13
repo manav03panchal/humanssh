@@ -8,7 +8,7 @@ use crate::config::timing;
 #[cfg(not(test))]
 use crate::terminal::TerminalExitEvent;
 use crate::terminal::TerminalPane;
-use crate::theme::{terminal_colors, SwitchTheme};
+use crate::theme::terminal_colors;
 use gpui::prelude::FluentBuilder;
 use gpui::{
     div, hsla, px, App, AppContext, ClickEvent, Context, ElementId, FontWeight, InteractiveElement,
@@ -16,9 +16,7 @@ use gpui::{
     Styled, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::menu::DropdownMenu;
-use gpui_component::theme::ThemeRegistry;
-use gpui_component::{ActiveTheme, IconName, Root, Sizable};
+use gpui_component::Root;
 use uuid::Uuid;
 
 /// Pending action requiring confirmation
@@ -416,30 +414,6 @@ impl Workspace {
             }
         }
     }
-
-    /// Render the theme selector dropdown
-    fn render_theme_selector(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        Button::new("theme-selector")
-            .icon(IconName::Palette)
-            .small()
-            .ghost()
-            .tooltip("Select Theme")
-            .dropdown_menu(move |menu, _, cx| {
-                let themes = ThemeRegistry::global(cx).sorted_themes();
-                let current = cx.theme().theme_name().clone();
-
-                let mut menu = menu.min_w(px(180.0));
-
-                for theme in themes {
-                    let name = theme.name.clone();
-                    let is_current = current == name;
-                    menu =
-                        menu.menu_with_check(name.clone(), is_current, Box::new(SwitchTheme(name)));
-                }
-
-                menu
-            })
-    }
 }
 
 impl Workspace {
@@ -698,31 +672,6 @@ impl Render for Workspace {
                     )
                     // Spacer
                     .child(div().flex_1())
-                    // Theme selector
-                    .child(
-                        div()
-                            .h(px(38.0))
-                            .flex()
-                            .items_center()
-                            .child(self.render_theme_selector(cx)),
-                    )
-                    // Settings button
-                    .child(
-                        div()
-                            .h(px(38.0))
-                            .flex()
-                            .items_center()
-                            .child(
-                                Button::new("settings-btn")
-                                    .icon(IconName::Settings)
-                                    .small()
-                                    .ghost()
-                                    .tooltip("Settings (Cmd+,)")
-                                    .on_click(cx.listener(|_this, _, _window, _cx| {
-                                        super::settings::open_config_file();
-                                    })),
-                            ),
-                    )
             )
             .child(
                 // Pane content
