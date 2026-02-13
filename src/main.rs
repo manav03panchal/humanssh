@@ -72,15 +72,27 @@ fn init_logging() {
     }
 }
 
+/// Compute a centered origin for the given window size on the primary display.
+fn centered_origin(w: f32, h: f32, cx: &mut App) -> Point<Pixels> {
+    if let Some(display) = cx.primary_display() {
+        let screen = display.bounds();
+        let x = (f32::from(screen.size.width) - w) / 2.0;
+        let y = (f32::from(screen.size.height) - h) / 2.0;
+        Point::new(px(x.max(0.0)), px(y.max(0.0)))
+    } else {
+        Point::default()
+    }
+}
+
 /// Build window options using saved bounds (macOS/Windows).
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-fn build_window_options() -> WindowOptions {
+fn build_window_options(cx: &mut App) -> WindowOptions {
     let config = humanssh::config::file::load_config();
     let w = config.window_width.unwrap_or(1200.0);
     let h = config.window_height.unwrap_or(800.0);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(100.0), px(100.0)),
+            origin: centered_origin(w, h, cx),
             size: Size {
                 width: px(w),
                 height: px(h),
@@ -94,7 +106,7 @@ fn build_window_options() -> WindowOptions {
 /// Build window options using saved bounds (Linux).
 /// Includes window_decorations setting for Wayland/X11 compositors.
 #[cfg(target_os = "linux")]
-fn build_window_options() -> WindowOptions {
+fn build_window_options(cx: &mut App) -> WindowOptions {
     let config = humanssh::config::file::load_config();
     let w = config.window_width.unwrap_or(1200.0);
     let h = config.window_height.unwrap_or(800.0);
@@ -106,7 +118,7 @@ fn build_window_options() -> WindowOptions {
 
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(100.0), px(100.0)),
+            origin: centered_origin(w, h, cx),
             size: Size {
                 width: px(w),
                 height: px(h),
@@ -120,13 +132,13 @@ fn build_window_options() -> WindowOptions {
 
 /// Build window options using saved bounds (other Unix).
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn build_window_options() -> WindowOptions {
+fn build_window_options(cx: &mut App) -> WindowOptions {
     let config = humanssh::config::file::load_config();
     let w = config.window_width.unwrap_or(1200.0);
     let h = config.window_height.unwrap_or(800.0);
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(Bounds {
-            origin: Point::new(px(100.0), px(100.0)),
+            origin: centered_origin(w, h, cx),
             size: Size {
                 width: px(w),
                 height: px(h),
@@ -188,7 +200,8 @@ fn build_titlebar_options() -> TitlebarOptions {
 
 /// Open the main application window.
 fn open_main_window(cx: &mut App) -> Result<()> {
-    cx.open_window(build_window_options(), |window, cx| {
+    let options = build_window_options(cx);
+    cx.open_window(options, |window, cx| {
         let app_view = cx.new(Workspace::new);
         cx.new(|cx| gpui_component::Root::new(app_view, window, cx))
     })
