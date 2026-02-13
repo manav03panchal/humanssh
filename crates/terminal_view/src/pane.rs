@@ -17,7 +17,8 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use terminal::types::{
-    BgRegion, CursorInfo, DisplayState, MouseEscBuf, RenderCell, RenderData, TermSize,
+    BgRegion, CursorInfo, DisplayState, MouseEscBuf, ProgressState, RenderCell, RenderData,
+    TermSize,
 };
 use terminal::PtyHandler;
 use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
@@ -229,6 +230,8 @@ pub struct TerminalPane {
     copy_mode: CopyModeState,
     /// Dedicated VT processing thread (kept alive for Drop cleanup)
     _vt_processor: Option<terminal::TerminalProcessor>,
+    /// Progress bar state from OSC 9;4 sequences
+    progress: ProgressState,
 }
 
 impl EventEmitter<TerminalExitEvent> for TerminalPane {}
@@ -317,6 +320,7 @@ impl TerminalPane {
             scroll_reverse: user_config.scroll_reverse,
             copy_mode: CopyModeState::new(size.rows as usize, size.cols as usize),
             _vt_processor: vt_processor,
+            progress: ProgressState::default(),
         }
     }
 
@@ -388,6 +392,7 @@ impl TerminalPane {
             scroll_reverse: user_config.scroll_reverse,
             copy_mode: CopyModeState::new(size.rows as usize, size.cols as usize),
             _vt_processor: vt_processor,
+            progress: ProgressState::default(),
         }
     }
 
@@ -442,6 +447,14 @@ impl TerminalPane {
                         };
                         let needs_render = vt.take_render_needed();
                         let is_exited = vt.has_exited();
+
+                        // Update progress bar state from VT processor
+                        let new_progress = vt.progress();
+                        if pane.progress != new_progress {
+                            pane.progress = new_progress;
+                            cx.notify();
+                        }
+
                         if needs_render {
                             cx.notify();
                         }
@@ -533,6 +546,11 @@ impl TerminalPane {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
         })
+    }
+
+    /// Get the current progress bar state (from OSC 9;4 sequences).
+    pub fn progress(&self) -> ProgressState {
+        self.progress
     }
 
     /// Get the terminal title (set by OSC escape sequences)
@@ -1985,6 +2003,7 @@ impl Render for TerminalPane {
         let font_family_clone = font_family.clone();
         let font_fallbacks_clone = self.font_fallbacks.clone();
 
+        let progress_state = self.progress;
         let show_pointer = self.hovered_url.is_some();
 
         // Main container with canvas for efficient rendering
@@ -2383,6 +2402,7 @@ impl Render for TerminalPane {
                             search_current,
                             hovered_url,
                             font_fallbacks_clone,
+                            progress_state,
                         )
                     },
                     // Paint: draw backgrounds and cell-by-cell text
@@ -2403,6 +2423,7 @@ impl Render for TerminalPane {
                             search_current,
                             hovered_url,
                             font_fallbacks,
+                            progress_state,
                         ) = data;
 
                         let origin = bounds.origin;
@@ -2802,6 +2823,53 @@ impl Render for TerminalPane {
                                 CursorShape::Hidden => {
                                     // Don't draw anything
                                 }
+                            }
+                        }
+
+                        // 5. Paint progress bar at bottom of terminal area (OSC 9;4)
+                        if progress_state.is_visible() {
+                            let bar_height = px(3.0);
+                            let bar_y = bounds.origin.y + bounds.size.height - bar_height;
+                            let total_width: f32 = bounds.size.width.into();
+
+                            let (bar_color, bar_width) = match progress_state {
+                                ProgressState::Normal(pct) => {
+                                    // Green
+                                    let color = hsla(0.33, 0.8, 0.45, 1.0);
+                                    let width = total_width * (pct as f32 / 100.0);
+                                    (color, width)
+                                }
+                                ProgressState::Error(pct) => {
+                                    // Red
+                                    let color = hsla(0.0, 0.8, 0.45, 1.0);
+                                    let width = total_width * (pct as f32 / 100.0);
+                                    (color, width)
+                                }
+                                ProgressState::Paused(pct) => {
+                                    // Yellow
+                                    let color = hsla(0.13, 0.8, 0.50, 1.0);
+                                    let width = total_width * (pct as f32 / 100.0);
+                                    (color, width)
+                                }
+                                ProgressState::Indeterminate => {
+                                    // Dim full-width bar as MVP
+                                    let color = hsla(0.33, 0.5, 0.35, 0.6);
+                                    (color, total_width)
+                                }
+                                ProgressState::Hidden => unreachable!(),
+                            };
+
+                            if bar_width > 0.0 {
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        Point::new(bounds.origin.x, bar_y),
+                                        Size {
+                                            width: px(bar_width),
+                                            height: bar_height,
+                                        },
+                                    ),
+                                    bar_color,
+                                ));
                             }
                         }
                     },

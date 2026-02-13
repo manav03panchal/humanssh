@@ -5,7 +5,8 @@
 use actions::{
     ClosePane, CloseTab, EnterCopyMode, ExitCopyMode, FocusNextPane, FocusPrevPane, NewTab,
     NextTab, OpenSettings, PrevTab, Quit, SearchNext, SearchPrev, SearchToggle, SearchToggleRegex,
-    SendShiftTab, SendTab, SplitHorizontal, SplitVertical, ToggleOptionAsAlt, ToggleSecureInput,
+    SendShiftTab, SendTab, SplitHorizontal, SplitVertical, ToggleCommandPalette, ToggleOptionAsAlt,
+    ToggleQuickTerminal, ToggleSecureInput,
 };
 use anyhow::{Context, Result};
 use gpui::*;
@@ -251,6 +252,11 @@ fn register_keybindings(cx: &mut App) {
         KeyBinding::new("cmd-shift-g", SearchPrev, Some("terminal")),
         // Copy mode
         KeyBinding::new("cmd-shift-c", EnterCopyMode, Some("terminal")),
+        // Command palette
+        KeyBinding::new("cmd-shift-p", ToggleCommandPalette, None),
+        KeyBinding::new("ctrl-shift-p", ToggleCommandPalette, None),
+        // Quick terminal (drop-down visor)
+        KeyBinding::new("ctrl-`", ToggleQuickTerminal, None),
     ]);
 
     // Apply user custom keybindings (these override defaults since GPUI uses last-wins)
@@ -296,6 +302,12 @@ fn apply_custom_keybindings(config: &settings::Config, cx: &mut App) {
             }
             "enter-copy-mode" => bindings.push(KeyBinding::new(keys, EnterCopyMode, context)),
             "exit-copy-mode" => bindings.push(KeyBinding::new(keys, ExitCopyMode, context)),
+            "toggle-quick-terminal" => {
+                bindings.push(KeyBinding::new(keys, ToggleQuickTerminal, context))
+            }
+            "toggle-command-palette" => {
+                bindings.push(KeyBinding::new(keys, ToggleCommandPalette, context))
+            }
             other => {
                 tracing::warn!("Unknown keybinding action: '{}'", other);
             }

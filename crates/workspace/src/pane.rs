@@ -25,6 +25,7 @@
 //! 4. Pattern matching enables exhaustive handling of all pane types
 
 use gpui::{AnyElement, App, Entity, FocusHandle, IntoElement, SharedString, Window};
+use terminal::ProgressState;
 use terminal_view::TerminalPane;
 
 /// Type-safe enum for different pane types.
@@ -77,6 +78,13 @@ impl PaneKind {
     pub fn title(&self, cx: &App) -> Option<SharedString> {
         match self {
             PaneKind::Terminal(terminal) => terminal.read(cx).title(),
+        }
+    }
+
+    /// Get the progress bar state (from OSC 9;4 sequences).
+    pub fn progress(&self, cx: &App) -> ProgressState {
+        match self {
+            PaneKind::Terminal(terminal) => terminal.read(cx).progress(),
         }
     }
 

@@ -31,6 +31,12 @@ actions!(
 // Copy mode
 actions!(humanssh, [EnterCopyMode, ExitCopyMode]);
 
+// Command palette
+actions!(humanssh, [ToggleCommandPalette]);
+
+// Quick terminal (drop-down visor)
+actions!(humanssh, [ToggleQuickTerminal]);
+
 // Terminal-specific actions to capture keys before GPUI's focus system
 actions!(terminal, [SendTab, SendShiftTab]);
 

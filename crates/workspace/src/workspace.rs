@@ -2,9 +2,11 @@
 //!
 //! Tabs, split panes, and status bar.
 
+mod command_palette;
 mod pane;
 mod pane_group;
 mod pane_group_view;
+mod quick_terminal;
 mod settings_opener;
 mod status_bar;
 mod workspace_view;

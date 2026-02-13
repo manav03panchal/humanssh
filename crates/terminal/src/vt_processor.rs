@@ -7,6 +7,7 @@
 //! Signaling to the UI uses a simple `AtomicBool` render-needed flag that GPUI
 //! polls via a lightweight timer, avoiding async channel dependencies.
 
+use crate::types::ProgressState;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::Processor;
@@ -36,6 +37,7 @@ pub struct TerminalProcessor {
     shutdown: Arc<AtomicBool>,
     render_needed: Arc<AtomicBool>,
     exited_flag: Arc<AtomicBool>,
+    progress: Arc<Mutex<ProgressState>>,
 }
 
 impl TerminalProcessor {
@@ -57,10 +59,12 @@ impl TerminalProcessor {
     {
         let shutdown = Arc::new(AtomicBool::new(false));
         let render_needed = Arc::new(AtomicBool::new(false));
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
 
         let shutdown_clone = shutdown.clone();
         let render_needed_clone = render_needed.clone();
         let exited_clone = exited.clone();
+        let progress_clone = progress.clone();
 
         thread::Builder::new()
             .name("humanssh-vt-processor".into())
@@ -72,6 +76,7 @@ impl TerminalProcessor {
                     exited_clone,
                     render_needed_clone,
                     shutdown_clone,
+                    progress_clone,
                 );
             })
             .expect("failed to spawn VT processing thread");
@@ -80,6 +85,7 @@ impl TerminalProcessor {
             shutdown,
             render_needed,
             exited_flag: exited,
+            progress,
         }
     }
 
@@ -91,6 +97,11 @@ impl TerminalProcessor {
     /// Check if the PTY process has exited.
     pub fn has_exited(&self) -> bool {
         self.exited_flag.load(Ordering::Acquire)
+    }
+
+    /// Get the current progress bar state (set by OSC 9;4 sequences).
+    pub fn progress(&self) -> ProgressState {
+        *self.progress.lock()
     }
 }
 
@@ -104,6 +115,9 @@ impl Drop for TerminalProcessor {
 ///
 /// Blocks on the PTY output channel, batches all available data, parses VT sequences
 /// under a brief term lock, then sets a render-needed flag (throttled to 60fps).
+///
+/// Also intercepts OSC 9;4 (progress bar) sequences before alacritty processes them,
+/// since alacritty doesn't handle this ConEmu extension natively.
 fn vt_thread_loop<L: EventListener>(
     output_rx: Receiver<Vec<u8>>,
     term: Arc<Mutex<Term<L>>>,
@@ -111,6 +125,7 @@ fn vt_thread_loop<L: EventListener>(
     exited: Arc<AtomicBool>,
     render_needed: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
+    progress: Arc<Mutex<ProgressState>>,
 ) {
     // Start in the past so the first batch of data always triggers a signal
     let mut last_signal = Instant::now() - MIN_FRAME_INTERVAL;
@@ -130,6 +145,9 @@ fn vt_thread_loop<L: EventListener>(
                 while let Ok(more) = output_rx.try_recv() {
                     batch_buffer.extend_from_slice(&more);
                 }
+
+                // Intercept OSC 9;4 sequences before alacritty processes them
+                extract_osc9_4(&batch_buffer, &progress);
 
                 // Parse VT sequences under brief lock
                 {
@@ -161,6 +179,59 @@ fn vt_thread_loop<L: EventListener>(
             break;
         }
     }
+}
+
+/// Scan a byte buffer for OSC 9;4 progress bar sequences and update the shared state.
+///
+/// OSC 9;4 format: `ESC ] 9 ; 4 ; STATE ; PROGRESS BEL` or `ESC ] 9 ; 4 ; STATE ; PROGRESS ESC \`
+/// where ESC = 0x1B, BEL = 0x07, and ST = ESC \.
+///
+/// We scan for the prefix `\x1b]9;4;` and extract the payload up to the terminator.
+/// This is called on every batch before alacritty processes it, so it handles split
+/// sequences across batches by only matching complete sequences.
+fn extract_osc9_4(buffer: &[u8], progress: &Arc<Mutex<ProgressState>>) {
+    const PREFIX: &[u8] = b"\x1b]9;4;";
+
+    let mut pos = 0;
+    while pos + PREFIX.len() < buffer.len() {
+        if let Some(offset) = memchr_prefix(&buffer[pos..], PREFIX) {
+            let start = pos + offset + PREFIX.len();
+            // Find the terminator: BEL (0x07) or ST (ESC \)
+            if let Some((end, payload)) = find_osc_terminator(&buffer[start..]) {
+                if let Ok(payload_str) = std::str::from_utf8(payload) {
+                    if let Some(new_state) = ProgressState::parse_osc9_4(payload_str) {
+                        *progress.lock() = new_state;
+                    }
+                }
+                pos = start + end;
+            } else {
+                // No terminator found — incomplete sequence, stop scanning
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+}
+
+/// Find the prefix in a byte slice (simple linear scan).
+fn memchr_prefix(haystack: &[u8], prefix: &[u8]) -> Option<usize> {
+    haystack.windows(prefix.len()).position(|w| w == prefix)
+}
+
+/// Find the OSC string terminator (BEL or ST) and return (offset past terminator, payload slice).
+fn find_osc_terminator(data: &[u8]) -> Option<(usize, &[u8])> {
+    for (i, &byte) in data.iter().enumerate() {
+        if byte == 0x07 {
+            // BEL terminator
+            return Some((i + 1, &data[..i]));
+        }
+        if byte == 0x1b && data.get(i + 1) == Some(&b'\\') {
+            // ST (ESC \) terminator
+            return Some((i + 2, &data[..i]));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -240,5 +311,117 @@ mod tests {
         let vt = TerminalProcessor::start(output_rx, term, processor, exited);
 
         drop(vt);
+    }
+
+    #[test]
+    fn vt_processor_detects_osc9_4_progress() {
+        let (output_tx, output_rx) = std::sync::mpsc::sync_channel(64);
+        let size = TermSize::default();
+        let config = Config::default();
+        let term = Arc::new(Mutex::new(Term::new(config, &size, TestListener)));
+        let processor = Arc::new(Mutex::new(Processor::new()));
+        let exited = Arc::new(AtomicBool::new(false));
+
+        let vt = TerminalProcessor::start(output_rx, term, processor, exited);
+
+        // Send OSC 9;4 with BEL terminator: 50% normal progress
+        output_tx.send(b"\x1b]9;4;1;50\x07".to_vec()).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if vt.progress() == ProgressState::Normal(50) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for progress update"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+
+        drop(vt);
+    }
+
+    // ==================== OSC 9;4 Parsing Tests ====================
+
+    #[test]
+    fn extract_osc9_4_normal_bel() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        extract_osc9_4(b"\x1b]9;4;1;75\x07", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Normal(75));
+    }
+
+    #[test]
+    fn extract_osc9_4_normal_st() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        extract_osc9_4(b"\x1b]9;4;1;42\x1b\\", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Normal(42));
+    }
+
+    #[test]
+    fn extract_osc9_4_hidden() {
+        let progress = Arc::new(Mutex::new(ProgressState::Normal(50)));
+        extract_osc9_4(b"\x1b]9;4;0;0\x07", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Hidden);
+    }
+
+    #[test]
+    fn extract_osc9_4_error() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        extract_osc9_4(b"\x1b]9;4;2;80\x07", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Error(80));
+    }
+
+    #[test]
+    fn extract_osc9_4_indeterminate() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        extract_osc9_4(b"\x1b]9;4;3;0\x07", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Indeterminate);
+    }
+
+    #[test]
+    fn extract_osc9_4_paused() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        extract_osc9_4(b"\x1b]9;4;4;60\x07", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Paused(60));
+    }
+
+    #[test]
+    fn extract_osc9_4_embedded_in_output() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        let buffer = b"some text before\x1b]9;4;1;33\x07more text after";
+        extract_osc9_4(buffer, &progress);
+        assert_eq!(*progress.lock(), ProgressState::Normal(33));
+    }
+
+    #[test]
+    fn extract_osc9_4_multiple_sequences() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        let buffer = b"\x1b]9;4;1;25\x07\x1b]9;4;1;75\x07";
+        extract_osc9_4(buffer, &progress);
+        // Last one wins
+        assert_eq!(*progress.lock(), ProgressState::Normal(75));
+    }
+
+    #[test]
+    fn extract_osc9_4_clamps_to_100() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        extract_osc9_4(b"\x1b]9;4;1;200\x07", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Normal(100));
+    }
+
+    #[test]
+    fn extract_osc9_4_incomplete_ignored() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        // No terminator — should not update
+        extract_osc9_4(b"\x1b]9;4;1;50", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Hidden);
+    }
+
+    #[test]
+    fn extract_osc9_4_invalid_state_ignored() {
+        let progress = Arc::new(Mutex::new(ProgressState::default()));
+        extract_osc9_4(b"\x1b]9;4;9;50\x07", &progress);
+        assert_eq!(*progress.lock(), ProgressState::Hidden);
     }
 }

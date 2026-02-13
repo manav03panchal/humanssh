@@ -111,6 +111,66 @@ pub struct RenderData {
     pub cursor: Option<CursorInfo>,
 }
 
+/// Progress bar state from OSC 9;4 (ConEmu/Windows Terminal extension).
+///
+/// Terminal programs can send `\x1b]9;4;STATE;PROGRESS\x07` to indicate task progress.
+/// States: 0=hidden, 1=normal, 2=error, 3=indeterminate, 4=paused.
+/// Progress: 0-100 percentage.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ProgressState {
+    Hidden,
+    Normal(u8),
+    Error(u8),
+    Indeterminate,
+    Paused(u8),
+}
+
+impl Default for ProgressState {
+    fn default() -> Self {
+        Self::Hidden
+    }
+}
+
+impl ProgressState {
+    /// Parse an OSC 9;4 payload (the part after "9;4;").
+    /// Expected format: "STATE;PROGRESS" where STATE is 0-4 and PROGRESS is 0-100.
+    pub fn parse_osc9_4(payload: &str) -> Option<Self> {
+        let mut parts = payload.splitn(2, ';');
+        let state_str = parts.next()?;
+        let state: u8 = state_str.parse().ok()?;
+
+        match state {
+            0 => Some(Self::Hidden),
+            3 => Some(Self::Indeterminate),
+            1 | 2 | 4 => {
+                let progress_str = parts.next().unwrap_or("0");
+                let progress: u8 = progress_str.parse::<u8>().ok()?.min(100);
+                match state {
+                    1 => Some(Self::Normal(progress)),
+                    2 => Some(Self::Error(progress)),
+                    4 => Some(Self::Paused(progress)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Get the progress percentage, if applicable.
+    pub fn percentage(&self) -> Option<u8> {
+        match self {
+            Self::Hidden => None,
+            Self::Normal(p) | Self::Error(p) | Self::Paused(p) => Some(*p),
+            Self::Indeterminate => None,
+        }
+    }
+
+    /// Whether this state should be visually displayed.
+    pub fn is_visible(&self) -> bool {
+        !matches!(self, Self::Hidden)
+    }
+}
+
 /// Stack-allocated buffer for mouse escape sequences.
 ///
 /// Avoids heap allocation for mouse events. Max SGR sequence:
@@ -159,6 +219,102 @@ mod tests {
     use proptest::prelude::*;
     use std::fmt::Write;
     use test_case::test_case;
+
+    // ==================== ProgressState Tests ====================
+
+    #[test]
+    fn test_progress_state_default() {
+        assert_eq!(ProgressState::default(), ProgressState::Hidden);
+    }
+
+    #[test]
+    fn test_progress_state_parse_hidden() {
+        assert_eq!(
+            ProgressState::parse_osc9_4("0;0"),
+            Some(ProgressState::Hidden)
+        );
+        assert_eq!(
+            ProgressState::parse_osc9_4("0"),
+            Some(ProgressState::Hidden)
+        );
+    }
+
+    #[test]
+    fn test_progress_state_parse_normal() {
+        assert_eq!(
+            ProgressState::parse_osc9_4("1;50"),
+            Some(ProgressState::Normal(50))
+        );
+        assert_eq!(
+            ProgressState::parse_osc9_4("1;0"),
+            Some(ProgressState::Normal(0))
+        );
+        assert_eq!(
+            ProgressState::parse_osc9_4("1;100"),
+            Some(ProgressState::Normal(100))
+        );
+    }
+
+    #[test]
+    fn test_progress_state_parse_error() {
+        assert_eq!(
+            ProgressState::parse_osc9_4("2;80"),
+            Some(ProgressState::Error(80))
+        );
+    }
+
+    #[test]
+    fn test_progress_state_parse_indeterminate() {
+        assert_eq!(
+            ProgressState::parse_osc9_4("3;0"),
+            Some(ProgressState::Indeterminate)
+        );
+        assert_eq!(
+            ProgressState::parse_osc9_4("3"),
+            Some(ProgressState::Indeterminate)
+        );
+    }
+
+    #[test]
+    fn test_progress_state_parse_paused() {
+        assert_eq!(
+            ProgressState::parse_osc9_4("4;60"),
+            Some(ProgressState::Paused(60))
+        );
+    }
+
+    #[test]
+    fn test_progress_state_parse_clamps() {
+        assert_eq!(
+            ProgressState::parse_osc9_4("1;200"),
+            Some(ProgressState::Normal(100))
+        );
+    }
+
+    #[test]
+    fn test_progress_state_parse_invalid() {
+        assert_eq!(ProgressState::parse_osc9_4("5;50"), None);
+        assert_eq!(ProgressState::parse_osc9_4("abc"), None);
+        assert_eq!(ProgressState::parse_osc9_4(""), None);
+    }
+
+    #[test]
+    fn test_progress_state_percentage() {
+        assert_eq!(ProgressState::Hidden.percentage(), None);
+        assert_eq!(ProgressState::Normal(50).percentage(), Some(50));
+        assert_eq!(ProgressState::Error(80).percentage(), Some(80));
+        assert_eq!(ProgressState::Indeterminate.percentage(), None);
+        assert_eq!(ProgressState::Paused(30).percentage(), Some(30));
+    }
+
+    #[test]
+    fn test_progress_state_is_visible() {
+        assert!(!ProgressState::Hidden.is_visible());
+        assert!(ProgressState::Normal(50).is_visible());
+        assert!(ProgressState::Error(80).is_visible());
+        assert!(ProgressState::Indeterminate.is_visible());
+        assert!(ProgressState::Paused(30).is_visible());
+    }
 
     // ==================== TermSize Tests ====================
 

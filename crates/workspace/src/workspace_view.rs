@@ -1,14 +1,16 @@
 //! Main workspace - container for tabs and split panes.
 
+use crate::command_palette::{CommandPalette, CommandPaletteDismiss};
 use crate::pane::PaneKind;
 use crate::pane_group::{PaneNode, SplitDirection};
+use crate::quick_terminal::QuickTerminalState;
 use crate::status_bar::{render_status_bar, stats_collector, SystemStats};
-use actions::{CloseTab, OpenSettings, Quit};
+use actions::{CloseTab, OpenSettings, Quit, ToggleCommandPalette, ToggleQuickTerminal};
 use gpui::prelude::FluentBuilder;
 use gpui::{
-    div, hsla, px, App, AppContext, ClickEvent, Context, ElementId, FontWeight, InteractiveElement,
-    IntoElement, KeyDownEvent, ParentElement, Render, SharedString, StatefulInteractiveElement,
-    Styled, Window,
+    div, hsla, px, relative, App, AppContext, ClickEvent, Context, ElementId, Entity, FontWeight,
+    InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::Root;
@@ -63,13 +65,25 @@ struct Tab {
 impl Tab {
     /// Get the display title for this tab (dynamic from pane or fallback)
     fn display_title(&self, cx: &App) -> SharedString {
-        // Try to get dynamic title from the active pane
+        let base_title = if let Some(pane) = self.panes.find_pane(self.active_pane) {
+            pane.title(cx)
+                .unwrap_or_else(|| self.fallback_title.clone())
+        } else {
+            self.fallback_title.clone()
+        };
+
+        // Append progress percentage if the active pane has an active progress bar
         if let Some(pane) = self.panes.find_pane(self.active_pane) {
-            if let Some(title) = pane.title(cx) {
-                return title;
+            let progress = pane.progress(cx);
+            if let Some(pct) = progress.percentage() {
+                return format!("{} [{}%]", base_title, pct).into();
+            }
+            if matches!(progress, terminal::ProgressState::Indeterminate) {
+                return format!("{} [...]", base_title).into();
             }
         }
-        self.fallback_title.clone()
+
+        base_title
     }
 }
 
@@ -94,6 +108,12 @@ pub struct Workspace {
     last_saved_bounds: Option<(f32, f32, f32, f32)>,
     /// Cached system stats for status bar
     cached_stats: SystemStats,
+    /// Quick terminal (drop-down visor) state
+    pub(crate) quick_terminal: Option<QuickTerminalState>,
+    /// Command palette entity (Some when visible)
+    command_palette: Option<Entity<CommandPalette>>,
+    /// Subscription for command palette events (kept alive while palette is open)
+    _command_palette_subscriptions: Vec<Subscription>,
 }
 
 impl Workspace {
@@ -128,6 +148,9 @@ impl Workspace {
             last_title_update: std::time::Instant::now(),
             last_saved_bounds: None,
             cached_stats: SystemStats::default(),
+            quick_terminal: None,
+            command_palette: None,
+            _command_palette_subscriptions: Vec::new(),
         }
     }
 
@@ -252,6 +275,39 @@ impl Workspace {
     fn cancel_pending_action(&mut self, cx: &mut Context<Self>) {
         self.pending_action = None;
         self.pending_process_name = None;
+        cx.notify();
+    }
+
+    fn toggle_command_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.command_palette.is_some() {
+            self.dismiss_command_palette(cx);
+        } else {
+            let palette = cx.new(CommandPalette::new);
+
+            let sub = cx.subscribe_in(
+                &palette,
+                window,
+                |this, _palette, event: &CommandPaletteDismiss, window, cx| {
+                    let action = event.action.as_ref().map(|a| a.boxed_clone());
+                    this.dismiss_command_palette(cx);
+                    if let Some(action) = action {
+                        window.dispatch_action(action, cx);
+                    }
+                },
+            );
+
+            self._command_palette_subscriptions = vec![sub];
+
+            let focus = palette.read(cx).focus_handle.clone();
+            window.focus(&focus);
+            self.command_palette = Some(palette);
+            cx.notify();
+        }
+    }
+
+    fn dismiss_command_palette(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = None;
+        self._command_palette_subscriptions.clear();
         cx.notify();
     }
 
@@ -479,6 +535,70 @@ impl Workspace {
         self.do_close_pane(cx);
     }
 
+    /// Ensure the quick terminal exists, creating it on first call.
+    pub(crate) fn ensure_quick_terminal(&mut self, cx: &mut Context<Self>) {
+        if self.quick_terminal.is_some() {
+            return;
+        }
+        let height = settings::file::load_config()
+            .quick_terminal_height
+            .clamp(0.1, 1.0);
+
+        #[allow(unused_mut)]
+        let mut state = QuickTerminalState::new(height, Vec::new(), cx);
+
+        // Subscribe to terminal exit so we tear down the quick terminal when the shell exits
+        #[cfg(not(test))]
+        {
+            let terminal = state.terminal.clone();
+            let sub = cx.subscribe(&terminal, |this, _, _: &TerminalExitEvent, cx| {
+                this.quick_terminal = None;
+                cx.notify();
+            });
+            state._subscriptions.push(sub);
+        }
+
+        self.quick_terminal = Some(state);
+    }
+
+    /// Toggle the quick terminal overlay.
+    fn toggle_quick_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_quick_terminal(cx);
+
+        if let Some(qt) = &mut self.quick_terminal {
+            let now_visible = qt.toggle();
+            if now_visible {
+                let focus = qt.terminal.read(cx).focus_handle.clone();
+                focus.focus(window);
+            } else {
+                // Return focus to active workspace pane
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                        let pane_focus = pane.focus_handle(cx);
+                        pane_focus.focus(window);
+                    }
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    /// Hide the quick terminal if visible, returning focus to the workspace.
+    fn hide_quick_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(qt) = &mut self.quick_terminal {
+            if qt.visible {
+                qt.visible = false;
+                if let Some(tab) = self.tabs.get(self.active_tab) {
+                    if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                        let pane_focus = pane.focus_handle(cx);
+                        pane_focus.focus(window);
+                    }
+                }
+                cx.notify();
+            }
+        }
+    }
+
     /// Actually close the active pane (or tab if only one pane, or quit if last tab)
     fn do_close_pane(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -587,12 +707,20 @@ impl Render for Workspace {
         // Save window bounds if changed
         self.maybe_save_window_bounds(window);
 
-        // Focus the active pane
-        if let Some(tab) = self.tabs.get(self.active_tab) {
-            if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
-                let pane_focus = pane.focus_handle(cx);
-                if !pane_focus.is_focused(window) {
-                    window.focus(&pane_focus);
+        // Focus the active pane (unless an overlay is focused)
+        let quick_terminal_focused = self
+            .quick_terminal
+            .as_ref()
+            .is_some_and(|qt| qt.visible && qt.terminal.read(cx).focus_handle.is_focused(window));
+        let command_palette_focused = self.command_palette.is_some();
+
+        if !quick_terminal_focused && !command_palette_focused {
+            if let Some(tab) = self.tabs.get(self.active_tab) {
+                if let Some(pane) = tab.panes.find_pane(tab.active_pane) {
+                    let pane_focus = pane.focus_handle(cx);
+                    if !pane_focus.is_focused(window) {
+                        window.focus(&pane_focus);
+                    }
                 }
             }
         }
@@ -642,6 +770,12 @@ impl Render for Workspace {
             }))
             .on_action(cx.listener(|this, _: &CloseTab, _window, cx| {
                 this.request_close_pane(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleQuickTerminal, window, cx| {
+                this.toggle_quick_terminal(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleCommandPalette, window, cx| {
+                this.toggle_command_palette(window, cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
@@ -795,6 +929,39 @@ impl Render for Workspace {
             )
             // Status bar
             .child(render_status_bar(&self.cached_stats, cx))
+            // Quick terminal overlay
+            .when(
+                self.quick_terminal.as_ref().is_some_and(|qt| qt.visible),
+                |d| {
+                    let qt = self.quick_terminal.as_ref().expect("checked above");
+                    let height_frac = qt.height_fraction;
+                    let terminal_entity = qt.terminal.clone();
+                    d.child(
+                        div()
+                            .id("quick-terminal-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.hide_quick_terminal(window, cx);
+                            }))
+                    )
+                    .child(
+                        div()
+                            .id("quick-terminal-overlay")
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .right_0()
+                            .h(relative(height_frac))
+                            .bg(background)
+                            .border_b_1()
+                            .border_color(border_color)
+                            .shadow_lg()
+                            .overflow_hidden()
+                            .child(terminal_entity)
+                    )
+                },
+            )
             // Confirmation dialog overlay
             .when(self.pending_action.is_some(), |d| {
                 let action_text = match self.pending_action {
@@ -881,6 +1048,10 @@ impl Render for Workspace {
                                 )
                         )
                 )
+            })
+            // Command palette overlay
+            .when_some(self.command_palette.clone(), |d, palette| {
+                d.child(palette)
             })
             // Dialog layer - must be rendered for dialogs to appear
             .children(Root::render_dialog_layer(window, cx))
