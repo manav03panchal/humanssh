@@ -103,6 +103,7 @@ pub fn send_notification(title: &str, body: &str) {
         title.replace('\\', "\\\\").replace('"', "\\\""),
     );
 
+    #[allow(clippy::disallowed_methods)] // Fire-and-forget notification, blocking is fine
     match Command::new("osascript").args(["-e", &script]).spawn() {
         Ok(_) => info!("Notification sent: {}", title),
         Err(e) => warn!("Failed to send notification: {}", e),

@@ -1,0 +1,18 @@
+# Clippy configuration for HumanSSH
+# Prevents common GPUI footguns and enforces best practices.
+
+disallowed-methods = [
+    # GPUI uses smol, not Tokio timers. Tokio panics with "no reactor running".
+    { path = "tokio::time::sleep", reason = "Use cx.background_executor().timer() in GPUI context" },
+    { path = "tokio::time::interval", reason = "Use cx.background_executor().timer() in GPUI context" },
+
+    # Use smol::process or gpui_tokio for async process spawning.
+    { path = "std::process::Command::spawn", reason = "Blocking. Use smol::process::Command or gpui_tokio::spawn" },
+
+    # Prefer serde_json::from_slice (faster, avoids buffered reader overhead).
+    { path = "serde_json::from_reader", reason = "Slow. Use serde_json::from_slice instead" },
+
+    # Use parking_lot for consistency.
+    { path = "std::sync::Mutex::new", reason = "Use parking_lot::Mutex for consistency" },
+    { path = "std::sync::RwLock::new", reason = "Use parking_lot::RwLock for consistency" },
+]

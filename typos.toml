@@ -1,0 +1,20 @@
+# Spell checker configuration for HumanSSH
+# Install: cargo install typos-cli
+# Run: typos
+
+[files]
+extend-exclude = [
+    "Cargo.lock",
+    "*.min.js",
+    "themes/*.json",
+    "target/",
+]
+
+[default.extend-words]
+# Domain-specific terms that are not typos
+pty = "pty"
+ptys = "ptys"
+hsla = "hsla"
+rgba = "rgba"
+smol = "smol"
+signin = "signin"

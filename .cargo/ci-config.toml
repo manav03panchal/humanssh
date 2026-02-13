@@ -1,0 +1,13 @@
+# CI-only Cargo configuration for HumanSSH.
+# In CI, copy this to ../.cargo/config.toml so it takes precedence.
+# Adds -D warnings (deny all warnings) and limited debug info.
+
+[target.'cfg(all())']
+rustflags = ["-D", "warnings", "-C", "symbol-mangling-version=v0"]
+
+[profile.dev]
+debug = "limited"
+
+[target.x86_64-unknown-linux-gnu]
+linker = "clang"
+rustflags = ["-C", "link-arg=-fuse-ld=mold", "-D", "warnings"]

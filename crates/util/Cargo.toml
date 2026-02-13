@@ -1,16 +1,17 @@
 [package]
-name = "xtask"
+name = "util"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "xtask"
-path = "src/main.rs"
+[lib]
+name = "util"
+path = "src/util.rs"
+doctest = false
 
 [dependencies]
-toml.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

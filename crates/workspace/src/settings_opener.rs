@@ -4,6 +4,7 @@
 
 /// Open the config file in the user's editor.
 /// Creates a default config file if it doesn't exist.
+#[allow(clippy::disallowed_methods)] // Fire-and-forget editor launch, blocking is fine
 pub fn open_config_file() {
     let Some(path) = settings::ensure_config_file() else {
         tracing::warn!("Could not determine config file path");

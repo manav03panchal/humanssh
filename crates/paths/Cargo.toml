@@ -1,16 +1,17 @@
 [package]
-name = "xtask"
+name = "humanssh_paths"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
-[[bin]]
-name = "xtask"
-path = "src/main.rs"
+[lib]
+name = "humanssh_paths"
+path = "src/paths.rs"
+doctest = false
 
 [dependencies]
-toml.workspace = true
+dirs.workspace = true
 
 [lints]
 workspace = true

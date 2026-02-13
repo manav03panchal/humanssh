@@ -4,6 +4,8 @@
 [build]
 # Use all available CPU cores for parallel compilation
 jobs = -1
+# Better backtraces for async/closures
+rustflags = ["-C", "symbol-mangling-version=v0"]
 
 [profile.test]
 # Enable incremental compilation for faster test rebuilds
@@ -14,6 +16,8 @@ opt-level = 1
 [env]
 # Better backtraces in tests - shows full backtraces on panic
 RUST_BACKTRACE = { value = "1", force = false }
+# macOS deployment target for compatibility (Catalina+)
+MACOSX_DEPLOYMENT_TARGET = { value = "10.15.7", force = false }
 
 [target.'cfg(target_os = "macos")']
 # macOS-specific linker optimizations

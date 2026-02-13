@@ -558,11 +558,13 @@ impl TerminalPane {
         if event.modifiers.platform && event.button == MouseButton::Left {
             let line_text = self.get_row_text(row);
             if let Some(url) = Self::find_url_at_position(&line_text, col) {
-                // Open URL in default browser
+                // Open URL in default browser (fire-and-forget, blocking is fine)
+                #[allow(clippy::disallowed_methods)]
                 #[cfg(target_os = "macos")]
                 {
                     let _ = std::process::Command::new("open").arg(&url).spawn();
                 }
+                #[allow(clippy::disallowed_methods)]
                 #[cfg(target_os = "linux")]
                 {
                     let _ = std::process::Command::new("xdg-open").arg(&url).spawn();
@@ -1647,6 +1649,7 @@ impl Render for TerminalPane {
                     // TODO: This will be wired up via the workspace crate's action binding.
                     // For now, try to open the config file directly via settings.
                     if let Some(path) = settings::config_path() {
+                        #[allow(clippy::disallowed_methods)]
                         #[cfg(target_os = "macos")]
                         {
                             let editor =
@@ -1659,6 +1662,7 @@ impl Render for TerminalPane {
                                 let _ = command.spawn();
                             }
                         }
+                        #[allow(clippy::disallowed_methods)]
                         #[cfg(not(target_os = "macos"))]
                         {
                             let editor =

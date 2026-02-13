@@ -274,7 +274,7 @@ pub struct PtyHandler {
     child: Box<dyn Child + Send + Sync>,
     _reader_thread: thread::JoinHandle<()>,
     /// Cached process detection results (avoids blocking UI)
-    process_cache: std::sync::Mutex<ProcessCache>,
+    process_cache: parking_lot::Mutex<ProcessCache>,
 }
 
 impl PtyHandler {
@@ -444,7 +444,7 @@ impl PtyHandler {
             exited,
             child,
             _reader_thread: reader_thread,
-            process_cache: std::sync::Mutex::new(ProcessCache::default()),
+            process_cache: parking_lot::Mutex::new(ProcessCache::default()),
         })
     }
 
@@ -561,7 +561,7 @@ impl PtyHandler {
             exited,
             child,
             _reader_thread: reader_thread,
-            process_cache: std::sync::Mutex::new(ProcessCache::default()),
+            process_cache: parking_lot::Mutex::new(ProcessCache::default()),
         })
     }
 
@@ -614,10 +614,7 @@ impl PtyHandler {
     /// Cache is refreshed every PROCESS_CACHE_TTL_MS milliseconds.
     pub fn has_running_processes(&self) -> bool {
         self.refresh_process_cache_if_stale();
-        self.process_cache
-            .lock()
-            .map(|cache| cache.has_children)
-            .unwrap_or(false)
+        self.process_cache.lock().has_children
     }
 
     /// Get the name of any running foreground process (for display in confirmation).
@@ -626,8 +623,9 @@ impl PtyHandler {
         self.refresh_process_cache_if_stale();
         self.process_cache
             .lock()
-            .ok()
-            .and_then(|cache| cache.process_name.as_ref().map(|n| n.to_string()))
+            .process_name
+            .as_ref()
+            .map(|n| n.to_string())
     }
 
     /// Get the current working directory of the foreground process.
@@ -780,10 +778,7 @@ impl PtyHandler {
     /// Refresh the process cache if it's stale (older than PROCESS_CACHE_TTL_MS).
     fn refresh_process_cache_if_stale(&self) {
         let needs_refresh = {
-            let cache = match self.process_cache.lock() {
-                Ok(c) => c,
-                Err(_) => return,
-            };
+            let cache = self.process_cache.lock();
             cache
                 .last_update
                 .is_none_or(|last| last.elapsed().as_millis() > PROCESS_CACHE_TTL_MS as u128)
@@ -791,11 +786,10 @@ impl PtyHandler {
 
         if needs_refresh {
             let (has_children, process_name) = self.detect_child_processes();
-            if let Ok(mut cache) = self.process_cache.lock() {
-                cache.has_children = has_children;
-                cache.process_name = process_name.map(|s| InlineProcessName::new(&s));
-                cache.last_update = Some(std::time::Instant::now());
-            }
+            let mut cache = self.process_cache.lock();
+            cache.has_children = has_children;
+            cache.process_name = process_name.map(|s| InlineProcessName::new(&s));
+            cache.last_update = Some(std::time::Instant::now());
         }
     }
 
@@ -2040,6 +2034,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // Test uses std::sync::Mutex intentionally for concurrency testing
     fn test_process_cache_concurrent_refresh() {
         // Tests concurrent access to process cache (simulating multiple callers)
         use std::sync::Barrier;
@@ -2047,7 +2042,7 @@ mod tests {
         const NUM_THREADS: usize = 8;
         const ACCESSES_PER_THREAD: usize = 100;
 
-        let cache = Arc::new(std::sync::Mutex::new(ProcessCache::default()));
+        let cache = Arc::new(parking_lot::Mutex::new(ProcessCache::default()));
         let barrier = Arc::new(Barrier::new(NUM_THREADS));
 
         let handles: Vec<_> = (0..NUM_THREADS)
@@ -2060,14 +2055,14 @@ mod tests {
                     for i in 0..ACCESSES_PER_THREAD {
                         // Simulate check and potential refresh
                         let needs_refresh = {
-                            let c = cache.lock().unwrap();
+                            let c = cache.lock();
                             c.last_update.is_none_or(|last| {
                                 last.elapsed().as_millis() > PROCESS_CACHE_TTL_MS as u128
                             })
                         };
 
                         if needs_refresh || i % 10 == 0 {
-                            let mut c = cache.lock().unwrap();
+                            let mut c = cache.lock();
                             c.has_children = thread_id % 2 == 0;
                             c.process_name =
                                 Some(InlineProcessName::new(&format!("proc-{}-{}", thread_id, i)));
@@ -2083,7 +2078,7 @@ mod tests {
         }
 
         // Verify cache is in valid state
-        let cache_guard = cache.lock().unwrap();
+        let cache_guard = cache.lock();
         assert!(cache_guard.last_update.is_some());
     }
 
@@ -2680,48 +2675,7 @@ mod tests {
         }
     }
 
-    // ========================================================================
-    // ERROR PATH TESTS - Mutex Poisoning
-    // ========================================================================
-
-    #[test]
-    #[ignore = "Mutex poisoning test can hang in some test frameworks - run manually"]
-    fn test_process_cache_mutex_poisoned_returns_default() {
-        // Test that poisoned mutex returns safe defaults
-        use std::sync::{Arc, Mutex};
-        use std::thread;
-
-        let cache = Arc::new(Mutex::new(ProcessCache {
-            has_children: true,
-            process_name: Some(InlineProcessName::new("test")),
-            last_update: Some(std::time::Instant::now()),
-        }));
-
-        let cache_clone = cache.clone();
-
-        // Poison the mutex by panicking in a separate thread while holding the lock
-        let handle = thread::spawn(move || {
-            let _guard = cache_clone.lock().unwrap();
-            panic!("Intentional panic to poison mutex");
-        });
-
-        // Wait for thread to finish (it will panic)
-        let _ = handle.join();
-
-        // Now the mutex is poisoned - lock should return Err
-        let lock_result = cache.lock();
-        assert!(
-            lock_result.is_err(),
-            "Mutex should be poisoned after panic in thread"
-        );
-
-        // Test the pattern used in has_running_processes - unwrap_or provides safe default
-        let has_children = cache.lock().map(|c| c.has_children).unwrap_or(false);
-        assert!(
-            !has_children,
-            "Should return safe default (false) on poisoned mutex"
-        );
-    }
+    // Mutex poisoning test removed: parking_lot::Mutex never poisons.
 
     // ========================================================================
     // ERROR PATH TESTS - Process Cache Edge Cases
