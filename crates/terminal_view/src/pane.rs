@@ -757,7 +757,14 @@ impl TerminalPane {
             let display_offset = term.grid().display_offset() as i32;
             let line = Line(row as i32 - display_offset);
             let point = TermPoint::new(line, Column(col));
-            let selection = TermSelection::new(SelectionType::Simple, point, Side::Left);
+
+            // Cmd+Option (macOS) or Alt (other) triggers rectangular/block selection
+            let selection_type = if event.modifiers.alt {
+                SelectionType::Block
+            } else {
+                SelectionType::Simple
+            };
+            let selection = TermSelection::new(selection_type, point, Side::Left);
             term.selection = Some(selection);
             drop(term);
             self.dragging = true;
@@ -2444,19 +2451,26 @@ impl Render for TerminalPane {
                                     let end_col = sel.end.column.0;
 
                                     for row in visible_start_row..=visible_end_row {
-                                        // For rows that are fully in the selection, select entire row
-                                        let col_start =
-                                            if row == visible_start_row && start_visual >= 0 {
-                                                start_col
-                                            } else {
-                                                0
-                                            };
-                                        let col_end =
-                                            if row == visible_end_row && end_visual == row as i32 {
+                                        let (col_start, col_end) = if sel.is_block {
+                                            // Block/rectangular: same column range on every row
+                                            (start_col, end_col + 1)
+                                        } else {
+                                            // Normal: first row partial, middle rows full, last row partial
+                                            let cs =
+                                                if row == visible_start_row && start_visual >= 0 {
+                                                    start_col
+                                                } else {
+                                                    0
+                                                };
+                                            let ce = if row == visible_end_row
+                                                && end_visual == row as i32
+                                            {
                                                 end_col + 1
                                             } else {
                                                 cols
                                             };
+                                            (cs, ce)
+                                        };
 
                                         let x =
                                             origin.x + px(PADDING + col_start as f32 * cell_width);
