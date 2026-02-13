@@ -6,6 +6,8 @@
 
 mod pty_handler;
 pub mod types;
+pub mod vt_processor;
 
 pub use pty_handler::PtyHandler;
 pub use types::*;
+pub use vt_processor::TerminalProcessor;

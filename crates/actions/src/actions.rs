@@ -23,7 +23,13 @@ actions!(humanssh, [FocusNextPane, FocusPrevPane]);
 actions!(humanssh, [ToggleSecureInput, ToggleOptionAsAlt]);
 
 // Search
-actions!(humanssh, [SearchToggle, SearchNext, SearchPrev]);
+actions!(
+    humanssh,
+    [SearchToggle, SearchNext, SearchPrev, SearchToggleRegex]
+);
+
+// Copy mode
+actions!(humanssh, [EnterCopyMode, ExitCopyMode]);
 
 // Terminal-specific actions to capture keys before GPUI's focus system
 actions!(terminal, [SendTab, SendShiftTab]);

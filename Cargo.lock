@@ -6732,6 +6732,7 @@ dependencies = [
  "parking_lot",
  "pretty_assertions",
  "proptest",
+ "regex",
  "settings",
  "sysinfo 0.32.1",
  "terminal",
