@@ -226,6 +226,8 @@ fn glob_matches(pattern: &str, text: &str) -> bool {
 const DEFAULT_CONFIG: &str = r#"# HumanSSH Configuration
 # Changes are applied live — just save this file.
 
+# ─── Appearance ───────────────────────────────────────────────────────
+
 # Color theme (must match a theme name from the themes/ directory)
 theme = "Catppuccin Mocha"
 
@@ -235,6 +237,25 @@ font-family = "FONT_PLACEHOLDER"
 # Terminal font size in points
 font-size = 14
 
+# Fallback fonts for characters not in the primary font (e.g. CJK, emoji, icons)
+# font-fallbacks = ["Symbols Nerd Font", "Apple Color Emoji"]
+
+# ─── Terminal ─────────────────────────────────────────────────────────
+
+# Maximum scrollback buffer size (lines)
+scrollback-lines = 10000
+
+# Reverse scroll direction ("natural" scrolling like macOS trackpad)
+# scroll-reverse = false
+
+# ─── Window ───────────────────────────────────────────────────────────
+
+# Window dimensions (auto-managed; uncomment to override)
+# window-width = 1200
+# window-height = 800
+
+# ─── Platform ─────────────────────────────────────────────────────────
+
 # macOS: treat Option key as Alt for terminal input
 # Set to false to type special characters with Option (e.g. Option+3 = #)
 option-as-alt = true
@@ -242,38 +263,54 @@ option-as-alt = true
 # macOS: enable Secure Keyboard Entry (prevents other apps from intercepting keystrokes)
 # secure-keyboard-entry = false
 
-# Maximum scrollback buffer size (lines)
-scrollback-lines = 10000
-
-# Window dimensions (auto-managed; uncomment to override)
-# window-width = 1200
-# window-height = 800
-
 # Linux: window decoration style — "server" (native) or "client" (app-drawn)
 # linux-decorations = "server"
 
 # Windows: shell — "powershell", "pwsh", or "cmd"
 # windows-shell = "powershell"
 
-# Reverse scroll direction ("natural" scrolling like macOS trackpad)
-# scroll-reverse = false
+# ─── Keybindings ──────────────────────────────────────────────────────
+# Override default keybindings. User bindings take priority over defaults.
+# Add "context" to restrict to terminal-focused panes.
+#
+# Available actions:
+#   quit, new-tab, close-tab, next-tab, prev-tab,
+#   split-vertical, split-horizontal, close-pane,
+#   focus-next-pane, focus-prev-pane, open-settings,
+#   toggle-secure-input, toggle-option-as-alt,
+#   search, search-next, search-prev, search-toggle-regex,
+#   enter-copy-mode, exit-copy-mode
+#
+# Default shortcuts:
+#   Cmd+T / Ctrl+Shift+T  — new tab
+#   Cmd+W / Ctrl+W        — close tab
+#   Cmd+Shift+] / Ctrl+Tab — next tab
+#   Cmd+Shift+[ / Ctrl+Shift+Tab — prev tab
+#   Cmd+D                 — split vertical
+#   Cmd+Shift+D           — split horizontal
+#   Cmd+Alt+Right/Left    — focus next/prev pane
+#   Cmd+F / Ctrl+F        — search
+#   Cmd+G / Cmd+Shift+G   — search next/prev
+#   Cmd+Alt+R / Alt+R     — toggle regex search
+#   Cmd+Shift+C           — enter copy mode
+#   Cmd+, / Ctrl+,        — open settings
+#   Cmd+Q / Ctrl+Q        — quit
 
-# Fallback fonts for characters not in the primary font (e.g. CJK, emoji, icons)
-# font-fallbacks = ["Symbols Nerd Font", "Apple Color Emoji"]
-
-# Custom keybindings (override defaults)
 # [[keybindings]]
 # keys = "cmd-shift-t"
 # action = "new-tab"
 #
 # [[keybindings]]
-# keys = "ctrl-l"
-# action = "clear"
+# keys = "ctrl-shift-f"
+# action = "search"
 # context = "terminal"
 
-# Profiles: named sets of overrides that can be selected or auto-switched.
+# ─── Profiles ─────────────────────────────────────────────────────────
+# Named configurations that override defaults. Profiles can auto-switch
+# based on hostname or directory using glob patterns (* and ? wildcards).
+
 # default-profile = "default"
-#
+
 # [[profiles]]
 # name = "default"
 # font-family = "JetBrains Mono"
