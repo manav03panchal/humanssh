@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "actions"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
 name = "addr2line"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2896,6 +2903,7 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "humanssh"
 version = "0.1.0"
 dependencies = [
+ "actions",
  "alacritty_terminal",
  "anyhow",
  "criterion",
@@ -2903,33 +2911,45 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "humanssh_workspace",
  "mockall",
- "notify",
- "notify-debouncer-mini",
- "objc2",
- "objc2-app-kit",
- "objc2-foundation",
  "once_cell",
- "parking_lot",
- "portable-pty",
+ "platform",
  "pretty_assertions",
  "proptest",
- "serde",
- "serde_json",
  "serial_test",
- "sysinfo 0.32.1",
+ "settings",
  "tempfile",
- "termwiz",
+ "terminal",
+ "terminal_view",
  "test-case",
- "tokio",
+ "theme",
  "tokio-test",
- "toml 0.8.23",
- "toml_edit 0.22.27",
  "tracing",
  "tracing-subscriber",
  "tracing-test",
- "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "humanssh_workspace"
+version = "0.1.0"
+dependencies = [
+ "actions",
+ "anyhow",
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "once_cell",
+ "parking_lot",
+ "platform",
+ "settings",
+ "sysinfo 0.32.1",
+ "terminal",
+ "terminal_view",
+ "theme",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -4721,6 +4741,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7edddbd0b52d732b21ad9a5fab5c704c14cd949e5e9a1ec5929a24fded1b904c"
 
 [[package]]
+name = "platform"
+version = "0.1.0"
+dependencies = [
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "tracing",
+]
+
+[[package]]
 name = "plotters"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6014,6 +6044,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "settings"
+version = "0.1.0"
+dependencies = [
+ "dirs 5.0.1",
+ "gpui",
+ "gpui-component",
+ "notify",
+ "notify-debouncer-mini",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "toml 0.8.23",
+ "toml_edit 0.22.27",
+ "tracing",
+]
+
+[[package]]
 name = "sha1_smol"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6617,6 +6665,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "terminal"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "dirs 5.0.1",
+ "gpui",
+ "mockall",
+ "once_cell",
+ "parking_lot",
+ "portable-pty",
+ "pretty_assertions",
+ "proptest",
+ "serde",
+ "settings",
+ "sysinfo 0.32.1",
+ "tempfile",
+ "termwiz",
+ "test-case",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "terminal_view"
+version = "0.1.0"
+dependencies = [
+ "actions",
+ "alacritty_terminal",
+ "anyhow",
+ "gpui",
+ "gpui-component",
+ "once_cell",
+ "parking_lot",
+ "pretty_assertions",
+ "proptest",
+ "settings",
+ "sysinfo 0.32.1",
+ "terminal",
+ "termwiz",
+ "test-case",
+ "theme",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "terminfo"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6726,6 +6822,23 @@ dependencies = [
  "quote",
  "syn 2.0.111",
  "test-case-core",
+]
+
+[[package]]
+name = "theme"
+version = "0.1.0"
+dependencies = [
+ "actions",
+ "gpui",
+ "gpui-component",
+ "once_cell",
+ "parking_lot",
+ "platform",
+ "serde",
+ "serde_json",
+ "settings",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]
@@ -8533,6 +8646,10 @@ name = "xmlwriter"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec7a2a501ed189703dba8b08142f057e887dfc4b2cc4db2d343ac6376ba3e0b9"
+
+[[package]]
+name = "xtask"
+version = "0.1.0"
 
 [[package]]
 name = "y4m"

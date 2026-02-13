@@ -1,0 +1,56 @@
+[package]
+name = "humanssh"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "humanssh"
+path = "src/main.rs"
+
+[dependencies]
+actions.workspace = true
+settings.workspace = true
+platform.workspace = true
+theme.workspace = true
+terminal.workspace = true
+terminal_view.workspace = true
+humanssh_workspace.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+once_cell.workspace = true
+dirs.workspace = true
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+alacritty_terminal.workspace = true
+tokio-test.workspace = true
+mockall.workspace = true
+proptest.workspace = true
+test-case.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true
+criterion.workspace = true
+wiremock.workspace = true
+serial_test.workspace = true
+tracing-test.workspace = true
+
+[[bench]]
+name = "benchmark"
+harness = false
+
+[package.metadata.bundle]
+name = "HumanSSH"
+identifier = "com.humancorp.humanssh"
+copyright = "Copyright 2025"
+category = "Developer Tools"
+short_description = "A fast, cross-platform SSH terminal"
+resources = ["../../resources/*"]
+
+[lints]
+workspace = true

@@ -63,3 +63,6 @@ rr = "run --release"
 
 # Documentation
 d = "doc --no-deps --open"
+
+# Build automation
+xtask = "run --package xtask --"
