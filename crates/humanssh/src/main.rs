@@ -2,7 +2,11 @@
 //!
 //! Main entry point for the application.
 
-use actions::{Quit, ToggleSecureInput};
+use actions::{
+    ClosePane, CloseTab, FocusNextPane, FocusPrevPane, NewTab, NextTab, OpenSettings, PrevTab,
+    Quit, SearchNext, SearchPrev, SearchToggle, SendShiftTab, SendTab, SplitHorizontal,
+    SplitVertical, ToggleOptionAsAlt, ToggleSecureInput,
+};
 use anyhow::{Context, Result};
 use gpui::*;
 use gpui_component_assets::Assets;
@@ -152,7 +156,7 @@ fn build_window_options(cx: &mut App) -> WindowOptions {
 fn build_titlebar_options() -> TitlebarOptions {
     TitlebarOptions {
         title: Some("HumanSSH".into()),
-        appears_transparent: true,
+        appears_transparent: false,
         ..Default::default()
     }
 }
@@ -205,8 +209,6 @@ fn open_main_window(cx: &mut App) -> Result<()> {
 
 /// Register keybindings.
 fn register_keybindings(cx: &mut App) {
-    use actions::{CloseTab, OpenSettings, SendShiftTab, SendTab};
-
     cx.on_action(|_: &Quit, cx| {
         info!("Application quit requested (fallback)");
         cx.quit();
@@ -227,9 +229,79 @@ fn register_keybindings(cx: &mut App) {
         // Terminal-specific: Tab key
         KeyBinding::new("tab", SendTab, Some("terminal")),
         KeyBinding::new("shift-tab", SendShiftTab, Some("terminal")),
+        // Tab navigation
+        KeyBinding::new("cmd-t", NewTab, None),
+        KeyBinding::new("ctrl-shift-t", NewTab, None),
+        KeyBinding::new("cmd-shift-]", NextTab, None),
+        KeyBinding::new("ctrl-tab", NextTab, None),
+        KeyBinding::new("cmd-shift-[", PrevTab, None),
+        KeyBinding::new("ctrl-shift-tab", PrevTab, None),
+        // Splits
+        KeyBinding::new("cmd-d", SplitVertical, None),
+        KeyBinding::new("cmd-shift-d", SplitHorizontal, None),
+        // Focus navigation
+        KeyBinding::new("cmd-alt-right", FocusNextPane, None),
+        KeyBinding::new("cmd-alt-left", FocusPrevPane, None),
+        // Search
+        KeyBinding::new("cmd-f", SearchToggle, Some("terminal")),
+        KeyBinding::new("ctrl-f", SearchToggle, Some("terminal")),
+        KeyBinding::new("cmd-g", SearchNext, Some("terminal")),
+        KeyBinding::new("cmd-shift-g", SearchPrev, Some("terminal")),
     ]);
 
+    // Apply user custom keybindings (these override defaults since GPUI uses last-wins)
+    let config = settings::load_config();
+    apply_custom_keybindings(&config, cx);
+
     debug!("Keybindings registered");
+}
+
+/// Apply custom keybindings from user config.
+/// Maps action name strings to GPUI KeyBinding registrations.
+fn apply_custom_keybindings(config: &settings::Config, cx: &mut App) {
+    let mut bindings: Vec<KeyBinding> = Vec::new();
+
+    for entry in &config.keybindings {
+        let context = entry.context.as_deref();
+        let keys = entry.keys.as_str();
+
+        // Map action name to concrete action type
+        match entry.action.as_str() {
+            "quit" => bindings.push(KeyBinding::new(keys, Quit, context)),
+            "new-tab" => bindings.push(KeyBinding::new(keys, NewTab, context)),
+            "close-tab" => bindings.push(KeyBinding::new(keys, CloseTab, context)),
+            "next-tab" => bindings.push(KeyBinding::new(keys, NextTab, context)),
+            "prev-tab" => bindings.push(KeyBinding::new(keys, PrevTab, context)),
+            "split-vertical" => bindings.push(KeyBinding::new(keys, SplitVertical, context)),
+            "split-horizontal" => bindings.push(KeyBinding::new(keys, SplitHorizontal, context)),
+            "close-pane" => bindings.push(KeyBinding::new(keys, ClosePane, context)),
+            "focus-next-pane" => bindings.push(KeyBinding::new(keys, FocusNextPane, context)),
+            "focus-prev-pane" => bindings.push(KeyBinding::new(keys, FocusPrevPane, context)),
+            "open-settings" => bindings.push(KeyBinding::new(keys, OpenSettings, context)),
+            "toggle-secure-input" => {
+                bindings.push(KeyBinding::new(keys, ToggleSecureInput, context))
+            }
+            "toggle-option-as-alt" => {
+                bindings.push(KeyBinding::new(keys, ToggleOptionAsAlt, context))
+            }
+            "search" => bindings.push(KeyBinding::new(keys, SearchToggle, context)),
+            "search-next" => bindings.push(KeyBinding::new(keys, SearchNext, context)),
+            "search-prev" => bindings.push(KeyBinding::new(keys, SearchPrev, context)),
+            other => {
+                tracing::warn!("Unknown keybinding action: '{}'", other);
+            }
+        }
+    }
+
+    if !bindings.is_empty() {
+        tracing::info!("Applying {} custom keybinding(s)", bindings.len());
+        cx.bind_keys(bindings);
+    }
+}
+
+/// Callback for config file changes — re-applies custom keybindings.
+fn on_keybinding_config_apply(config: &settings::Config, cx: &mut App) {
+    apply_custom_keybindings(config, cx);
 }
 
 /// Initialize subsystems.
@@ -242,6 +314,11 @@ fn initialize_subsystems(cx: &mut App) {
 
     register_keybindings(cx);
     debug!("Keybindings registered");
+
+    // Watch config for keybinding changes (re-applies custom bindings on reload)
+    if let Some(debouncer) = settings::watch_config(cx, on_keybinding_config_apply) {
+        Box::leak(Box::new(debouncer));
+    }
 }
 
 fn main() {

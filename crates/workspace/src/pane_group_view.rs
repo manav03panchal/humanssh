@@ -4,7 +4,7 @@
 //! This allows the tree logic to be tested without GPUI context.
 
 use crate::pane_group::{PaneNode, SplitDirection};
-use crate::workspace_view::Workspace;
+use crate::workspace_view::{TabDrag, Workspace};
 use gpui::*;
 use theme::terminal_colors;
 use uuid::Uuid;
@@ -13,6 +13,7 @@ use uuid::Uuid;
 ///
 /// Recursively builds nested flex containers for splits and terminal views for leaves.
 /// Unfocused panes are dimmed with a subtle overlay for visual distinction.
+/// Pane leaves accept tab drops to create splits (drag a tab onto a pane to split it).
 pub fn render_pane_tree(
     node: &PaneNode,
     active_pane: Uuid,
@@ -35,6 +36,30 @@ pub fn render_pane_tree(
                 .bg(colors.background)
                 .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                     this.set_active_pane(pane_id, cx);
+                }))
+                // Accept tab drops to create splits
+                .drag_over::<TabDrag>(|style, _, _, _| style.bg(hsla(0.6, 0.5, 0.3, 0.15)))
+                .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                    // Determine split direction from drop position relative to pane center.
+                    // Left/right half → horizontal split, top/bottom half → vertical split.
+                    let mouse = window.mouse_position();
+                    let bounds = window.bounds();
+                    let center_x = f32::from(bounds.origin.x) + f32::from(bounds.size.width) / 2.0;
+                    let center_y = f32::from(bounds.origin.y) + f32::from(bounds.size.height) / 2.0;
+                    let mx: f32 = mouse.x.into();
+                    let my: f32 = mouse.y.into();
+
+                    // Compare distance from center on each axis to decide direction
+                    let dx = (mx - center_x).abs();
+                    let dy = (my - center_y).abs();
+
+                    let direction = if dx > dy {
+                        SplitDirection::Horizontal
+                    } else {
+                        SplitDirection::Vertical
+                    };
+
+                    this.split_with_tab(drag.index, pane_id, direction, cx);
                 }))
                 .child(pane.render(_window));
 

@@ -19,6 +19,31 @@ use terminal_view::TerminalPane;
 use theme::terminal_colors;
 use uuid::Uuid;
 
+/// Payload for GPUI drag-and-drop tab reordering and split-by-drop.
+#[derive(Clone)]
+pub(crate) struct TabDrag {
+    pub(crate) index: usize,
+    pub(crate) title: SharedString,
+}
+
+/// Minimal ghost view rendered while dragging a tab.
+struct TabDragGhost {
+    title: SharedString,
+}
+
+impl Render for TabDragGhost {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .bg(hsla(0.0, 0.0, 0.2, 0.9))
+            .rounded(px(4.0))
+            .text_sm()
+            .text_color(hsla(0.0, 0.0, 0.8, 1.0))
+            .child(self.title.clone())
+    }
+}
+
 /// Pending action requiring confirmation
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum PendingAction {
@@ -372,6 +397,63 @@ impl Workspace {
         }
     }
 
+    /// Move a tab's pane content into a split of the given target pane.
+    ///
+    /// The source tab's pane tree becomes one side of the split in the current tab.
+    /// The source tab is removed from the tab list afterwards.
+    pub fn split_with_tab(
+        &mut self,
+        source_tab_idx: usize,
+        target_pane_id: Uuid,
+        direction: SplitDirection,
+        cx: &mut Context<Self>,
+    ) {
+        // Can't split a tab into itself
+        if source_tab_idx == self.active_tab {
+            return;
+        }
+        if source_tab_idx >= self.tabs.len() {
+            return;
+        }
+
+        // Take the source tab's pane tree
+        let source_tab = self.tabs.remove(source_tab_idx);
+
+        // Adjust active_tab index after removal
+        if self.active_tab > source_tab_idx {
+            self.active_tab -= 1;
+        }
+
+        // Get the pane content from the source tab
+        let source_pane = source_tab.panes;
+
+        // Split the target pane in the current tab, inserting the source content
+        if let Some(tab) = self.tabs.get_mut(self.active_tab) {
+            // Convert PaneNode to PaneKind for insertion
+            // If it's a leaf, use its pane directly; otherwise wrap it
+            let new_pane: PaneKind = match &source_pane {
+                PaneNode::Leaf { pane, .. } => pane.clone(),
+                PaneNode::Split { .. } => {
+                    // For split source tabs, just take the first leaf's pane
+                    if let Some((_, pane)) = source_pane.all_panes().into_iter().next() {
+                        pane
+                    } else {
+                        return;
+                    }
+                }
+            };
+
+            if let Some(new_pane_id) = tab.panes.split(target_pane_id, direction, new_pane) {
+                tab.active_pane = new_pane_id;
+            }
+        }
+
+        // Invalidate title cache
+        self.last_title_update =
+            std::time::Instant::now() - settings::constants::timing::TITLE_CACHE_TTL;
+        cx.notify();
+    }
+
     /// Set the active pane within the current tab
     pub fn set_active_pane(&mut self, pane_id: Uuid, cx: &mut Context<Self>) {
         if let Some(tab) = self.tabs.get_mut(self.active_tab) {
@@ -590,14 +672,15 @@ impl Render for Workspace {
             .child(
                 // Tab bar - flat cells stuck together
                 div()
+                    .id("tab-bar")
                     .h(px(38.0))
                     .w_full()
                     .bg(title_bar_bg)
                     .border_b_1()
                     .border_color(border_color)
                     .flex()
-                    .pl(px(78.0))
-                    .pr(px(8.0))
+                    .pl(px(settings::constants::tab_bar::LEFT_PADDING))
+                    .pr(px(settings::constants::tab_bar::RIGHT_PADDING))
                     // Tabs - stuck together, no gaps
                     .children(self.tabs.iter().enumerate().zip(tab_titles).map(|((i, tab), title)| {
                         let is_active = i == active_tab_idx;
@@ -621,6 +704,32 @@ impl Render for Workspace {
                                     .text_color(muted)
                                     .hover(|d| d.bg(tab_active_bg))
                             })
+                            // GPUI drag-and-drop: initiate drag with tab index as payload
+                            .on_drag(TabDrag { index: i, title: title.clone() }, move |drag, _position, _window, cx| {
+                                let ghost_title = drag.title.clone();
+                                cx.new(move |_cx| TabDragGhost { title: ghost_title })
+                            })
+                            // Accept drops of TabDrag payloads
+                            .drag_over::<TabDrag>(|style, _, _, _| {
+                                style.bg(hsla(0.0, 0.0, 1.0, 0.08))
+                            })
+                            .on_drop(cx.listener(move |this, drag: &TabDrag, _window, cx| {
+                                let from = drag.index;
+                                let to = i;
+                                if from != to && from < this.tabs.len() && to < this.tabs.len() {
+                                    this.tabs.swap(from, to);
+                                    // Follow the active tab through the swap
+                                    if this.active_tab == from {
+                                        this.active_tab = to;
+                                    } else if this.active_tab == to {
+                                        this.active_tab = from;
+                                    }
+                                    // Invalidate title cache
+                                    this.last_title_update = std::time::Instant::now()
+                                        - settings::constants::timing::TITLE_CACHE_TTL;
+                                    cx.notify();
+                                }
+                            }))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.switch_tab(i, cx);
                             }))

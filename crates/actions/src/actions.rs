@@ -22,6 +22,9 @@ actions!(humanssh, [FocusNextPane, FocusPrevPane]);
 // macOS native features
 actions!(humanssh, [ToggleSecureInput, ToggleOptionAsAlt]);
 
+// Search
+actions!(humanssh, [SearchToggle, SearchNext, SearchPrev]);
+
 // Terminal-specific actions to capture keys before GPUI's focus system
 actions!(terminal, [SendTab, SendShiftTab]);
 

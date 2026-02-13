@@ -13,6 +13,7 @@ use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{CursorShape, Processor};
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
 use terminal::types::{
@@ -22,7 +23,7 @@ use terminal::PtyHandler;
 use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
 use theme::{terminal_colors, TerminalColors};
 
-use actions::{SendShiftTab, SendTab, OPTION_AS_ALT};
+use actions::{SearchNext, SearchPrev, SearchToggle, SendShiftTab, SendTab, OPTION_AS_ALT};
 use parking_lot::{Mutex, RwLock};
 use std::fmt::Write as FmtWrite;
 use std::sync::atomic::Ordering;
@@ -104,24 +105,47 @@ fn calculate_cell_dimensions(
     (cell_width, cell_height)
 }
 
-/// Event listener that captures terminal events (like title changes)
+/// Event listener that captures terminal events (like title changes).
+///
+/// Also stores shell integration state for OSC 7 (current working directory)
+/// and OSC 133 (semantic prompt marking). Note that alacritty_terminal 0.25 and
+/// vte 0.15 do **not** parse OSC 7 or OSC 133 sequences — they fall through to
+/// vte's `unhandled` path. The fields below are ready for when we add a custom
+/// VTE pre-parser to intercept these sequences from raw PTY output before
+/// alacritty processes them. In the meantime, CWD can be obtained via the
+/// existing `PtyHandler::get_current_directory()` OS-level fallback.
 #[derive(Clone)]
 struct Listener {
     title: Arc<Mutex<Option<String>>>,
+    /// Current working directory reported by the shell via OSC 7.
+    /// Populated when a custom pre-parser intercepts `\e]7;file://host/path\a`.
+    cwd: Arc<Mutex<Option<String>>>,
+    /// Line number of the most recent prompt start (OSC 133;A).
+    /// Used for prompt-to-prompt navigation and command output selection.
+    last_prompt_line: Arc<Mutex<Option<i32>>>,
 }
 
 impl Listener {
     fn new() -> Self {
         Self {
             title: Arc::new(Mutex::new(None)),
+            cwd: Arc::new(Mutex::new(None)),
+            last_prompt_line: Arc::new(Mutex::new(None)),
         }
     }
 }
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        if let Event::Title(title) = event {
-            *self.title.lock() = Some(title);
+        // alacritty_terminal 0.25 / vte 0.15 emit Title, ResetTitle, Bell,
+        // Wakeup, ClipboardStore/Load, etc.  OSC 7 (CWD) and OSC 133
+        // (semantic prompts) are NOT emitted — they require a custom
+        // pre-parser on the raw PTY byte stream.  When that pre-parser is
+        // added, it will write directly to `self.cwd` / `self.last_prompt_line`.
+        match event {
+            Event::Title(title) => *self.title.lock() = Some(title),
+            Event::ResetTitle => *self.title.lock() = None,
+            _ => {}
         }
     }
 }
@@ -130,6 +154,29 @@ impl EventListener for Listener {
 /// Workspace subscribes to this to automatically clean up dead panes.
 #[derive(Clone, Debug)]
 pub struct TerminalExitEvent;
+
+/// In-buffer search state for the terminal.
+struct SearchState {
+    /// Whether the search bar is visible.
+    active: bool,
+    /// Current search query.
+    query: String,
+    /// Positions of all matches: Vec<(grid_line, start_col, end_col)>.
+    matches: Vec<(i32, usize, usize)>,
+    /// Index of the currently highlighted match.
+    current_match: usize,
+}
+
+impl SearchState {
+    fn new() -> Self {
+        Self {
+            active: false,
+            query: String::new(),
+            matches: Vec::new(),
+            current_match: 0,
+        }
+    }
+}
 
 /// Terminal pane that renders a PTY session.
 ///
@@ -156,6 +203,8 @@ pub struct TerminalPane {
     pub focus_handle: FocusHandle,
     /// Whether exit event has been emitted (to avoid duplicate events)
     exit_emitted: bool,
+    /// In-buffer search state
+    search: SearchState,
 }
 
 impl EventEmitter<TerminalExitEvent> for TerminalPane {}
@@ -212,6 +261,7 @@ impl TerminalPane {
             dragging: false,
             focus_handle,
             exit_emitted: false,
+            search: SearchState::new(),
         };
 
         // Display error message in terminal if PTY spawn failed
@@ -270,6 +320,7 @@ impl TerminalPane {
             dragging: false,
             focus_handle,
             exit_emitted: false,
+            search: SearchState::new(),
         };
 
         if let Some(error) = spawn_error {
@@ -428,6 +479,28 @@ impl TerminalPane {
             .lock()
             .as_ref()
             .map(|s: &String| s.clone().into())
+    }
+
+    /// Get the current working directory reported by the shell via OSC 7.
+    ///
+    /// Falls back to the OS-level `PtyHandler::get_current_directory()` when
+    /// OSC 7 data is not available (which is the current state, since
+    /// alacritty_terminal/vte do not parse OSC 7).
+    pub fn current_working_directory(&self) -> Option<std::path::PathBuf> {
+        // Prefer OSC 7 value if available (will be populated once we add a pre-parser).
+        if let Some(cwd) = self.listener.cwd.lock().as_ref() {
+            return Some(std::path::PathBuf::from(cwd));
+        }
+        // Fallback: query the OS for the foreground process CWD.
+        self.get_current_directory()
+    }
+
+    /// Get the line number of the most recent shell prompt (OSC 133;A).
+    ///
+    /// Returns `None` until a custom pre-parser is added to intercept OSC 133
+    /// sequences from raw PTY output.
+    pub fn last_prompt_line(&self) -> Option<i32> {
+        *self.listener.last_prompt_line.lock()
     }
 
     /// Convert pixel position (window coords) to terminal cell coordinates
@@ -881,6 +954,102 @@ impl TerminalPane {
             k if k.len() == 1 => k.chars().next().map(KeyCode::Char),
 
             _ => None,
+        }
+    }
+
+    /// Find all matches of the query in the terminal buffer.
+    fn find_matches(&mut self) {
+        self.search.matches.clear();
+        if self.search.query.is_empty() {
+            return;
+        }
+
+        let term = self.term.lock();
+        let grid = term.grid();
+        let screen_lines = grid.screen_lines() as i32;
+        let total_lines = grid.total_lines() as i32;
+        let cols = grid.columns();
+
+        // Search from top of history to bottom of screen
+        let start_line = -(total_lines - screen_lines);
+
+        for line_idx in start_line..screen_lines {
+            let row = &grid[Line(line_idx)];
+            let text: String = (0..cols).map(|c| row[Column(c)].c).collect();
+            let text_lower = text.to_lowercase();
+            let query_lower = self.search.query.to_lowercase();
+
+            let mut search_from = 0;
+            while let Some(pos) = text_lower[search_from..].find(&query_lower) {
+                let start = search_from + pos;
+                let end = start + self.search.query.len();
+                self.search.matches.push((line_idx, start, end));
+                search_from = start + 1;
+            }
+        }
+
+        // Reset current match index
+        if !self.search.matches.is_empty() {
+            self.search.current_match = 0;
+        }
+    }
+
+    /// Toggle search bar visibility.
+    fn toggle_search(&mut self, cx: &mut Context<Self>) {
+        self.search.active = !self.search.active;
+        if !self.search.active {
+            self.search.query.clear();
+            self.search.matches.clear();
+        }
+        cx.notify();
+    }
+
+    /// Move to the next match.
+    fn search_next(&mut self, cx: &mut Context<Self>) {
+        if !self.search.matches.is_empty() {
+            self.search.current_match = (self.search.current_match + 1) % self.search.matches.len();
+            self.scroll_to_match(cx);
+        }
+    }
+
+    /// Move to the previous match.
+    fn search_prev(&mut self, cx: &mut Context<Self>) {
+        if !self.search.matches.is_empty() {
+            self.search.current_match = if self.search.current_match == 0 {
+                self.search.matches.len() - 1
+            } else {
+                self.search.current_match - 1
+            };
+            self.scroll_to_match(cx);
+        }
+    }
+
+    /// Scroll the terminal to make the current match visible.
+    fn scroll_to_match(&mut self, cx: &mut Context<Self>) {
+        if let Some(&(line, _, _)) = self.search.matches.get(self.search.current_match) {
+            let mut term = self.term.lock();
+            let screen_lines = term.grid().screen_lines() as i32;
+            let display_offset = term.grid().display_offset() as i32;
+            // Visible lines in grid coordinates: from -display_offset to -display_offset + screen_lines - 1
+            let visible_top = -display_offset;
+            let visible_bottom = visible_top + screen_lines - 1;
+            if line < visible_top || line > visible_bottom {
+                // Scroll so match is centered in viewport.
+                // display_offset = -(line - screen_lines / 2) means
+                // the visible top is at line - screen_lines/2
+                let target_offset = -(line - screen_lines / 2);
+                let max_offset = (term.grid().total_lines() as i32 - screen_lines).max(0);
+                let clamped = target_offset.max(0).min(max_offset);
+                // Use scroll_display to set the offset: first go to top, then delta down
+                term.scroll_display(Scroll::Top);
+                let current_offset = term.grid().display_offset() as i32;
+                let delta = clamped - current_offset;
+                if delta != 0 {
+                    term.scroll_display(Scroll::Delta(-delta));
+                }
+            }
+            drop(term);
+            cx.notify();
         }
     }
 
@@ -1593,7 +1762,64 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &SendShiftTab, _window, _cx| {
                 this.send_input("\x1b[Z"); // Shift-Tab escape sequence
             }))
+            .on_action(cx.listener(|this, _: &SearchToggle, _window, cx| {
+                this.toggle_search(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SearchNext, _window, cx| {
+                this.search_next(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SearchPrev, _window, cx| {
+                this.search_prev(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                // When search is active, route typing to search query
+                if this.search.active {
+                    let key = event.keystroke.key.as_str();
+                    let mods = &event.keystroke.modifiers;
+
+                    match key {
+                        "escape" => {
+                            this.toggle_search(cx);
+                            return;
+                        }
+                        "enter" => {
+                            if mods.shift {
+                                this.search_prev(cx);
+                            } else {
+                                this.search_next(cx);
+                            }
+                            return;
+                        }
+                        "backspace" => {
+                            this.search.query.pop();
+                            this.find_matches();
+                            cx.notify();
+                            return;
+                        }
+                        _ => {}
+                    }
+                    // If it's a printable character (single char, no modifiers except shift)
+                    if key.len() == 1 && !mods.control && !mods.alt && !mods.platform {
+                        let ch = if mods.shift {
+                            key.to_uppercase()
+                        } else {
+                            key.to_string()
+                        };
+                        this.search.query.push_str(&ch);
+                        this.find_matches();
+                        cx.notify();
+                        return;
+                    }
+                    // Space key
+                    if key == "space" {
+                        this.search.query.push(' ');
+                        this.find_matches();
+                        cx.notify();
+                        return;
+                    }
+                    return; // Consume all other keys while search is active
+                }
+
                 // Handle keys that GPUI might intercept for focus/navigation
                 // These must be caught early before GPUI consumes them
                 let key = event.keystroke.key.as_str();
@@ -1725,7 +1951,57 @@ impl Render for TerminalPane {
             }))
             .size_full()
             .bg(bg_color)
-            .child(
+            // Search bar overlay (rendered above terminal content)
+            .when(self.search.active, |d| {
+                let match_info = if self.search.matches.is_empty() {
+                    "No results".to_string()
+                } else {
+                    format!(
+                        "{}/{}",
+                        self.search.current_match + 1,
+                        self.search.matches.len()
+                    )
+                };
+                let query_display = if self.search.query.is_empty() {
+                    "Search...".to_string()
+                } else {
+                    self.search.query.clone()
+                };
+                d.child(
+                    div()
+                        .id("search-bar")
+                        .absolute()
+                        .top(px(0.0))
+                        .right(px(0.0))
+                        .w(px(320.0))
+                        .h(px(36.0))
+                        .bg(hsla(0.0, 0.0, 0.15, 0.95))
+                        .border_1()
+                        .border_color(hsla(0.0, 0.0, 0.3, 1.0))
+                        .rounded_bl(px(6.0))
+                        .flex()
+                        .items_center()
+                        .px(px(8.0))
+                        .gap(px(4.0))
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(13.0))
+                                .text_color(hsla(0.0, 0.0, 0.85, 1.0))
+                                .child(query_display),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(hsla(0.0, 0.0, 0.5, 1.0))
+                                .child(match_info),
+                        ),
+                )
+            })
+            .child({
+                // Clone search state for the canvas closure
+                let search_matches = self.search.matches.clone();
+                let search_current = self.search.current_match;
                 // Canvas for GPU-accelerated terminal rendering
                 canvas(
                     // Prepaint: compute render data
@@ -1830,6 +2106,8 @@ impl Render for TerminalPane {
                             font_family_clone,
                             current_font_size,
                             display_offset,
+                            search_matches,
+                            search_current,
                         )
                     },
                     // Paint: draw backgrounds and cell-by-cell text
@@ -1846,6 +2124,8 @@ impl Render for TerminalPane {
                             font_family,
                             font_size,
                             display_offset,
+                            search_matches,
+                            search_current,
                         ) = data;
 
                         let origin = bounds.origin;
@@ -1920,6 +2200,40 @@ impl Render for TerminalPane {
                                         ));
                                     }
                                 }
+                            }
+                        }
+
+                        // 1.75. Highlight search matches (paint colored overlay rectangles)
+                        if !search_matches.is_empty() {
+                            for (idx, &(match_line, start_col, end_col)) in
+                                search_matches.iter().enumerate()
+                            {
+                                // Convert grid line to visual row
+                                let visual_row = match_line + display_offset;
+                                if visual_row < 0 || visual_row >= rows as i32 {
+                                    continue;
+                                }
+                                let row = visual_row as usize;
+                                let x = origin.x + px(PADDING + start_col as f32 * cell_width);
+                                let y = origin.y + px(PADDING + row as f32 * cell_height);
+                                let w = (end_col - start_col) as f32 * cell_width;
+
+                                let highlight_color = if idx == search_current {
+                                    hsla(0.14, 0.9, 0.5, 0.6) // Orange for current match
+                                } else {
+                                    hsla(0.14, 0.9, 0.5, 0.25) // Dim orange for other matches
+                                };
+
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        Point::new(x, y),
+                                        Size {
+                                            width: px(w),
+                                            height: px(cell_height),
+                                        },
+                                    ),
+                                    highlight_color,
+                                ));
                             }
                         }
 
@@ -2188,8 +2502,8 @@ impl Render for TerminalPane {
                         }
                     },
                 )
-                .size_full(),
-            )
+                .size_full()
+            })
     }
 }
 
@@ -2510,6 +2824,86 @@ mod tests {
             "Second".to_string(),
         ));
         assert_eq!(listener.title.lock().as_deref(), Some("Second"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_reset_title_event() {
+        use alacritty_terminal::event::EventListener;
+        let listener = Listener::new();
+
+        listener.send_event(alacritty_terminal::event::Event::Title(
+            "My Title".to_string(),
+        ));
+        assert_eq!(listener.title.lock().as_deref(), Some("My Title"));
+
+        listener.send_event(alacritty_terminal::event::Event::ResetTitle);
+        assert!(listener.title.lock().is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_new_has_no_cwd() {
+        let listener = Listener::new();
+        assert!(listener.cwd.lock().is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_new_has_no_prompt_line() {
+        let listener = Listener::new();
+        assert!(listener.last_prompt_line.lock().is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_cwd_direct_write() {
+        let listener = Listener::new();
+        // Simulate what a future OSC 7 pre-parser would do.
+        *listener.cwd.lock() = Some("/home/user/project".to_string());
+        assert_eq!(listener.cwd.lock().as_deref(), Some("/home/user/project"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_cwd_overwrite() {
+        let listener = Listener::new();
+        *listener.cwd.lock() = Some("/first".to_string());
+        *listener.cwd.lock() = Some("/second".to_string());
+        assert_eq!(listener.cwd.lock().as_deref(), Some("/second"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_prompt_line_direct_write() {
+        let listener = Listener::new();
+        // Simulate what a future OSC 133 pre-parser would do.
+        *listener.last_prompt_line.lock() = Some(42);
+        assert_eq!(*listener.last_prompt_line.lock(), Some(42));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_prompt_line_overwrite() {
+        let listener = Listener::new();
+        *listener.last_prompt_line.lock() = Some(10);
+        *listener.last_prompt_line.lock() = Some(25);
+        assert_eq!(*listener.last_prompt_line.lock(), Some(25));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_clone_preserves_cwd() {
+        let listener = Listener::new();
+        *listener.cwd.lock() = Some("/tmp/test".to_string());
+
+        let cloned = listener.clone();
+        assert_eq!(cloned.cwd.lock().as_deref(), Some("/tmp/test"));
+
+        // Arc-shared: mutation through clone is visible in original.
+        *cloned.cwd.lock() = Some("/tmp/other".to_string());
+        assert_eq!(listener.cwd.lock().as_deref(), Some("/tmp/other"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_listener_clone_preserves_prompt_line() {
+        let listener = Listener::new();
+        *listener.last_prompt_line.lock() = Some(7);
+
+        let cloned = listener.clone();
+        assert_eq!(*cloned.last_prompt_line.lock(), Some(7));
     }
 
     // ============================================================================

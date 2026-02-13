@@ -5,6 +5,18 @@
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// Custom keybinding: maps a key chord to an action name.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub struct KeybindingEntry {
+    /// Key chord (e.g., "cmd-shift-t", "ctrl-l")
+    pub keys: String,
+    /// Action name (e.g., "new-tab", "close-tab", "quit")
+    pub action: String,
+    /// Optional context scope (e.g., "terminal")
+    pub context: Option<String>,
+}
+
 /// User-facing config parsed from TOML.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, rename_all = "kebab-case")]
@@ -19,6 +31,8 @@ pub struct Config {
     pub option_as_alt: bool,
     /// macOS: enable Secure Keyboard Entry.
     pub secure_keyboard_entry: bool,
+    /// Maximum number of scrollback lines.
+    pub scrollback_lines: usize,
     /// Window width (auto-managed unless user overrides).
     pub window_width: Option<f32>,
     /// Window height (auto-managed unless user overrides).
@@ -27,6 +41,9 @@ pub struct Config {
     pub linux_decorations: Option<String>,
     /// Windows: shell preference ("powershell", "pwsh", or "cmd").
     pub windows_shell: Option<String>,
+    /// Custom keybindings (override defaults).
+    #[serde(default)]
+    pub keybindings: Vec<KeybindingEntry>,
 }
 
 impl Default for Config {
@@ -37,10 +54,12 @@ impl Default for Config {
             font_size: crate::constants::terminal::DEFAULT_FONT_SIZE,
             option_as_alt: true,
             secure_keyboard_entry: false,
+            scrollback_lines: crate::constants::scrollback::DEFAULT_LINES,
             window_width: None,
             window_height: None,
             linux_decorations: None,
             windows_shell: None,
+            keybindings: Vec::new(),
         }
     }
 }
@@ -65,6 +84,9 @@ option-as-alt = true
 # macOS: enable Secure Keyboard Entry (prevents other apps from intercepting keystrokes)
 # secure-keyboard-entry = false
 
+# Maximum scrollback buffer size (lines)
+scrollback-lines = 10000
+
 # Window dimensions (auto-managed; uncomment to override)
 # window-width = 1200
 # window-height = 800
@@ -74,6 +96,16 @@ option-as-alt = true
 
 # Windows: shell — "powershell", "pwsh", or "cmd"
 # windows-shell = "powershell"
+
+# Custom keybindings (override defaults)
+# [[keybindings]]
+# keys = "cmd-shift-t"
+# action = "new-tab"
+#
+# [[keybindings]]
+# keys = "ctrl-l"
+# action = "clear"
+# context = "terminal"
 "#;
 
 /// Return the config file path.
@@ -349,6 +381,56 @@ unknown-key = "whatever"
     fn empty_string_parses_to_defaults() {
         let cfg: Config = toml::from_str("").unwrap();
         assert_eq!(cfg, Config::default());
+    }
+
+    #[test]
+    fn parses_scrollback_lines() {
+        let toml_str = r#"scrollback-lines = 50000"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.scrollback_lines, 50_000);
+    }
+
+    #[test]
+    fn scrollback_lines_defaults_to_10000() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert_eq!(cfg.scrollback_lines, 10_000);
+    }
+
+    #[test]
+    fn parses_keybindings_array() {
+        let toml_str = r#"
+[[keybindings]]
+keys = "cmd-shift-t"
+action = "new-tab"
+
+[[keybindings]]
+keys = "ctrl-l"
+action = "clear"
+context = "terminal"
+"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.keybindings.len(), 2);
+        assert_eq!(cfg.keybindings[0].keys, "cmd-shift-t");
+        assert_eq!(cfg.keybindings[0].action, "new-tab");
+        assert!(cfg.keybindings[0].context.is_none());
+        assert_eq!(cfg.keybindings[1].keys, "ctrl-l");
+        assert_eq!(cfg.keybindings[1].action, "clear");
+        assert_eq!(cfg.keybindings[1].context.as_deref(), Some("terminal"));
+    }
+
+    #[test]
+    fn empty_keybindings_default_to_empty_vec() {
+        let toml_str = r#"theme = "Nord""#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.keybindings.is_empty());
+    }
+
+    #[test]
+    fn scrollback_max_lines_constant_is_sane() {
+        assert!(
+            crate::constants::scrollback::MAX_LINES >= crate::constants::scrollback::DEFAULT_LINES
+        );
+        assert!(crate::constants::scrollback::MAX_LINES <= 100_000);
     }
 
     #[test]

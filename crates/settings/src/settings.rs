@@ -5,4 +5,7 @@
 pub mod constants;
 pub mod file;
 
-pub use file::{apply_config, config_path, ensure_config_file, load_config, watch_config, Config};
+pub use file::{
+    apply_config, config_path, ensure_config_file, load_config, watch_config, Config,
+    KeybindingEntry,
+};

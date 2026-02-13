@@ -38,12 +38,7 @@ pub mod tab_bar {
     /// Tab bar height in pixels.
     pub const HEIGHT: f32 = 38.0;
 
-    /// Left padding for traffic light buttons (macOS).
-    #[cfg(target_os = "macos")]
-    pub const LEFT_PADDING: f32 = 78.0;
-
-    /// Left padding (Windows/Linux - no traffic lights).
-    #[cfg(not(target_os = "macos"))]
+    /// Left padding (traffic lights are in native titlebar, not in tab bar).
     pub const LEFT_PADDING: f32 = 8.0;
 
     /// Right padding.
@@ -84,6 +79,14 @@ pub mod timing {
     pub const CLEANUP_INTERVAL: Duration = Duration::from_millis(500);
     /// Tab title cache TTL.
     pub const TITLE_CACHE_TTL: Duration = Duration::from_millis(200);
+}
+
+/// Scrollback buffer configuration.
+pub mod scrollback {
+    /// Default scrollback buffer size in lines.
+    pub const DEFAULT_LINES: usize = 10_000;
+    /// Maximum allowed scrollback buffer size in lines.
+    pub const MAX_LINES: usize = 100_000;
 }
 
 /// Settings file validation limits.
