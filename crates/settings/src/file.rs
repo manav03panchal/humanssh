@@ -41,6 +41,11 @@ pub struct Config {
     pub linux_decorations: Option<String>,
     /// Windows: shell preference ("powershell", "pwsh", or "cmd").
     pub windows_shell: Option<String>,
+    /// Reverse scroll direction ("natural" scrolling).
+    pub scroll_reverse: bool,
+    /// Fallback font families for glyphs not in the primary font.
+    #[serde(default)]
+    pub font_fallbacks: Vec<String>,
     /// Custom keybindings (override defaults).
     #[serde(default)]
     pub keybindings: Vec<KeybindingEntry>,
@@ -59,6 +64,8 @@ impl Default for Config {
             window_height: None,
             linux_decorations: None,
             windows_shell: None,
+            scroll_reverse: false,
+            font_fallbacks: Vec::new(),
             keybindings: Vec::new(),
         }
     }
@@ -96,6 +103,12 @@ scrollback-lines = 10000
 
 # Windows: shell — "powershell", "pwsh", or "cmd"
 # windows-shell = "powershell"
+
+# Reverse scroll direction ("natural" scrolling like macOS trackpad)
+# scroll-reverse = false
+
+# Fallback fonts for characters not in the primary font (e.g. CJK, emoji, icons)
+# font-fallbacks = ["Symbols Nerd Font", "Apple Color Emoji"]
 
 # Custom keybindings (override defaults)
 # [[keybindings]]
@@ -446,5 +459,31 @@ context = "terminal"
         let legacy: LegacySettings = serde_json::from_str(json).unwrap();
         assert_eq!(legacy.theme.as_deref(), Some("Nord"));
         assert_eq!(legacy.font_family.as_deref(), Some("Fira Code"));
+    }
+
+    #[test]
+    fn parses_font_fallbacks() {
+        let toml_str = r#"font-fallbacks = ["Nerd Font", "Apple Color Emoji"]"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.font_fallbacks, vec!["Nerd Font", "Apple Color Emoji"]);
+    }
+
+    #[test]
+    fn empty_font_fallbacks_default() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.font_fallbacks.is_empty());
+    }
+
+    #[test]
+    fn parses_scroll_reverse() {
+        let toml_str = r#"scroll-reverse = true"#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.scroll_reverse);
+    }
+
+    #[test]
+    fn scroll_reverse_defaults_to_false() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.scroll_reverse);
     }
 }

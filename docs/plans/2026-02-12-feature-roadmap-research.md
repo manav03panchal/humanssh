@@ -187,6 +187,12 @@
 - [ ] Configurable scrollback
 
 ### Tier 2 -- Competitive Differentiation
+- [ ] **Decouple PTY processing from rendering** (critical perf fix)
+  - Move PTY read + VT parsing to a dedicated OS thread (not GPUI's smol executor)
+  - Render throttling: cap at 60fps, coalesce multiple reads into one render
+  - Snapshot-based rendering: paint from a grid snapshot, don't hold term lock during paint
+  - Damage tracking: only repaint rows that changed
+  - Current issue: under high output (`yes`, big compiles), main thread starves → UI freezes
 - [ ] GPU rendering with ligatures (follow Ghostty)
 - [ ] Kitty keyboard/graphics protocol (follow Ghostty)
 - [ ] tmux control mode integration (follow iTerm2)

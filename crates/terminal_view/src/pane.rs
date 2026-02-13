@@ -54,11 +54,12 @@ fn calculate_cell_dimensions(
     window: &mut Window,
     font_size: f32,
     font_family: &SharedString,
+    font_fallbacks: &Option<FontFallbacks>,
 ) -> (f32, f32) {
     let font = Font {
         family: font_family.clone(),
         features: ligature_features(),
-        fallbacks: None,
+        fallbacks: font_fallbacks.clone(),
         weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
     };
@@ -205,6 +206,12 @@ pub struct TerminalPane {
     exit_emitted: bool,
     /// In-buffer search state
     search: SearchState,
+    /// URL span under cursor when Cmd is held: (visual_row, start_col, end_col)
+    hovered_url: Option<(usize, usize, usize)>,
+    /// Configured font fallback chain for glyphs not in the primary font
+    font_fallbacks: Option<FontFallbacks>,
+    /// Reverse scroll direction ("natural" scrolling)
+    scroll_reverse: bool,
 }
 
 impl EventEmitter<TerminalExitEvent> for TerminalPane {}
@@ -252,6 +259,15 @@ impl TerminalPane {
         // being consumed by GPUI's focus navigation system
         let focus_handle = cx.focus_handle().tab_stop(false);
 
+        let user_config = settings::load_config();
+        let font_fallbacks = if user_config.font_fallbacks.is_empty() {
+            None
+        } else {
+            Some(FontFallbacks::from_fonts(
+                user_config.font_fallbacks.clone(),
+            ))
+        };
+
         let pane = Self {
             pty: Arc::new(Mutex::new(pty)),
             term,
@@ -262,6 +278,9 @@ impl TerminalPane {
             focus_handle,
             exit_emitted: false,
             search: SearchState::new(),
+            hovered_url: None,
+            font_fallbacks,
+            scroll_reverse: user_config.scroll_reverse,
         };
 
         // Display error message in terminal if PTY spawn failed
@@ -311,6 +330,15 @@ impl TerminalPane {
 
         let focus_handle = cx.focus_handle().tab_stop(false);
 
+        let user_config = settings::load_config();
+        let font_fallbacks = if user_config.font_fallbacks.is_empty() {
+            None
+        } else {
+            Some(FontFallbacks::from_fonts(
+                user_config.font_fallbacks.clone(),
+            ))
+        };
+
         let pane = Self {
             pty: Arc::new(Mutex::new(pty)),
             term,
@@ -321,6 +349,9 @@ impl TerminalPane {
             focus_handle,
             exit_emitted: false,
             search: SearchState::new(),
+            hovered_url: None,
+            font_fallbacks,
+            scroll_reverse: user_config.scroll_reverse,
         };
 
         if let Some(error) = spawn_error {
@@ -535,9 +566,9 @@ impl TerminalPane {
         }
     }
 
-    /// Extract URL at the given column position from a line of text.
-    /// Returns the URL if the column is within a URL boundary.
-    fn find_url_at_position(line: &str, col: usize) -> Option<String> {
+    /// Find the column span (start_col, end_col) of the URL at a given column position.
+    /// Returns `None` if the column is not within a URL.
+    fn find_url_span_at_position(line: &str, col: usize) -> Option<(usize, usize)> {
         // Characters that can appear in URLs (simplified set)
         const URL_CHARS: &str =
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~:/?#[]@!$&'()*+,;=%";
@@ -585,15 +616,22 @@ impl TerminalPane {
                     }
                 }
 
-                // Check if clicked column is within this URL
+                // Check if column is within this URL
                 if col >= url_start && col < url_end {
-                    return Some(chars[url_start..url_end].iter().collect());
+                    return Some((url_start, url_end));
                 }
 
                 search_start = url_end;
             }
         }
         None
+    }
+
+    /// Extract URL at the given column position from a line of text.
+    /// Returns the URL string if the column is within a URL boundary.
+    fn find_url_at_position(line: &str, col: usize) -> Option<String> {
+        let (start, end) = Self::find_url_span_at_position(line, col)?;
+        Some(line.chars().skip(start).take(end - start).collect())
     }
 
     /// Extract text content from a visual terminal row (accounting for scroll).
@@ -747,6 +785,21 @@ impl TerminalPane {
 
     /// Handle mouse move/drag event
     fn handle_mouse_move(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        // Update URL hover state (Cmd held = show URL underline)
+        let new_hover = if event.modifiers.platform {
+            self.pixel_to_cell(event.position).and_then(|(col, row)| {
+                let line_text = self.get_row_text(row);
+                Self::find_url_span_at_position(&line_text, col)
+                    .map(|(start, end)| (row, start, end))
+            })
+        } else {
+            None
+        };
+        if new_hover != self.hovered_url {
+            self.hovered_url = new_hover;
+            cx.notify();
+        }
+
         let Some((col, row)) = self.pixel_to_cell(event.position) else {
             return;
         };
@@ -805,6 +858,14 @@ impl TerminalPane {
 
         let (_, cell_height) = self.display.read().cell_dims;
 
+        // Compute scroll delta, reversing direction for "natural" scrolling if configured
+        let raw_delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
+        let delta_y = if self.scroll_reverse {
+            -raw_delta_y
+        } else {
+            raw_delta_y
+        };
+
         // If mouse reporting is enabled, send wheel events
         if mode.intersects(
             TermMode::MOUSE_REPORT_CLICK
@@ -812,7 +873,6 @@ impl TerminalPane {
                 | TermMode::MOUSE_MOTION
                 | TermMode::MOUSE_MODE,
         ) {
-            let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let button = if delta_y < 0.0 { 64 } else { 65 }; // 64 = wheel up, 65 = wheel down
             let seq = Self::encode_mouse_event(
                 button,
@@ -824,7 +884,6 @@ impl TerminalPane {
             self.send_input(seq.as_str());
         } else if mode.contains(TermMode::ALT_SCREEN) {
             // In alternate screen without mouse mode, send arrow keys for scrolling
-            let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let lines = (delta_y.abs() / cell_height).ceil() as usize;
             let key = if delta_y < 0.0 { "\x1b[A" } else { "\x1b[B" }; // Up or Down
 
@@ -833,7 +892,6 @@ impl TerminalPane {
             }
         } else {
             // Normal mode: scroll through terminal history (scrollback buffer)
-            let delta_y: f32 = event.delta.pixel_delta(px(cell_height)).y.into();
             let lines = (delta_y.abs() / cell_height).ceil() as i32;
 
             if lines > 0 {
@@ -1747,7 +1805,12 @@ impl Render for TerminalPane {
         drop(display_state); // Release read lock before potential write
 
         if needs_recalc {
-            let dims = calculate_cell_dimensions(window, current_font_size, &font_family);
+            let dims = calculate_cell_dimensions(
+                window,
+                current_font_size,
+                &font_family,
+                &self.font_fallbacks,
+            );
             let mut display = self.display.write();
             display.cell_dims = dims;
             display.cached_font_key = Some((font_size_bits, font_family.clone()));
@@ -1759,12 +1822,16 @@ impl Render for TerminalPane {
         let display_arc = self.display.clone();
         let colors_clone = colors;
         let font_family_clone = font_family.clone();
+        let font_fallbacks_clone = self.font_fallbacks.clone();
+
+        let show_pointer = self.hovered_url.is_some();
 
         // Main container with canvas for efficient rendering
         div()
             .id("terminal-pane")
             .key_context("terminal")
             .track_focus(&focus_handle)
+            .when(show_pointer, |d| d.cursor_pointer())
             // Handle Tab/Shift-Tab actions (bound below) to send to terminal
             .on_action(cx.listener(|this, _: &SendTab, _window, _cx| {
                 this.send_input("\t");
@@ -2009,8 +2076,9 @@ impl Render for TerminalPane {
                 )
             })
             .child({
-                // Clone search state for the canvas closure
+                // Clone search state and hover state for the canvas closure
                 let search_matches = self.search.matches.clone();
+                let hovered_url = self.hovered_url;
                 let search_current = self.search.current_match;
                 // Canvas for GPU-accelerated terminal rendering
                 canvas(
@@ -2118,6 +2186,8 @@ impl Render for TerminalPane {
                             display_offset,
                             search_matches,
                             search_current,
+                            hovered_url,
+                            font_fallbacks_clone,
                         )
                     },
                     // Paint: draw backgrounds and cell-by-cell text
@@ -2136,6 +2206,8 @@ impl Render for TerminalPane {
                             display_offset,
                             search_matches,
                             search_current,
+                            hovered_url,
+                            font_fallbacks,
                         ) = data;
 
                         let origin = bounds.origin;
@@ -2247,6 +2319,26 @@ impl Render for TerminalPane {
                             }
                         }
 
+                        // 1.9. Paint URL hover underline
+                        if let Some((hover_row, hover_start, hover_end)) = hovered_url {
+                            if hover_row < rows {
+                                let x = origin.x + px(PADDING + hover_start as f32 * cell_width);
+                                let y = origin.y
+                                    + px(PADDING + (hover_row as f32 + 1.0) * cell_height - 1.0);
+                                let w = (hover_end - hover_start) as f32 * cell_width;
+                                window.paint_quad(fill(
+                                    Bounds::new(
+                                        Point::new(x, y),
+                                        Size {
+                                            width: px(w),
+                                            height: px(1.0),
+                                        },
+                                    ),
+                                    hsla(0.58, 0.7, 0.65, 0.9),
+                                ));
+                            }
+                        }
+
                         // 2. Paint each cell at its exact grid position.
                         // Per-cell positioning guarantees cursor-text alignment since
                         // both use the same coordinate: col * cell_width.
@@ -2262,28 +2354,28 @@ impl Render for TerminalPane {
                         let font_normal = Font {
                             family: font_family.clone(),
                             features: ligature_features(),
-                            fallbacks: None,
+                            fallbacks: font_fallbacks.clone(),
                             weight: FontWeight::NORMAL,
                             style: FontStyle::Normal,
                         };
                         let font_bold = Font {
                             family: font_family.clone(),
                             features: ligature_features(),
-                            fallbacks: None,
+                            fallbacks: font_fallbacks.clone(),
                             weight: FontWeight::BOLD,
                             style: FontStyle::Normal,
                         };
                         let font_italic = Font {
                             family: font_family.clone(),
                             features: ligature_features(),
-                            fallbacks: None,
+                            fallbacks: font_fallbacks.clone(),
                             weight: FontWeight::NORMAL,
                             style: FontStyle::Italic,
                         };
                         let font_bold_italic = Font {
                             family: font_family.clone(),
                             features: ligature_features(),
-                            fallbacks: None,
+                            fallbacks: font_fallbacks,
                             weight: FontWeight::BOLD,
                             style: FontStyle::Italic,
                         };
