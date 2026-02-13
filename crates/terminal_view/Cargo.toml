@@ -24,6 +24,7 @@ sysinfo.workspace = true
 uuid.workspace = true
 once_cell.workspace = true
 termwiz.workspace = true
+regex.workspace = true
 
 [dev-dependencies]
 gpui = { workspace = true, features = ["test-support"] }

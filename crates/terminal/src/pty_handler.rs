@@ -269,7 +269,7 @@ const PROCESS_CACHE_TTL_MS: u64 = 500;
 pub struct PtyHandler {
     pair: PtyPair,
     writer: Box<dyn Write + Send>,
-    output_rx: Receiver<Vec<u8>>,
+    output_rx: Option<Receiver<Vec<u8>>>,
     exited: Arc<AtomicBool>,
     child: Box<dyn Child + Send + Sync>,
     _reader_thread: thread::JoinHandle<()>,
@@ -440,7 +440,7 @@ impl PtyHandler {
         Ok(Self {
             pair,
             writer,
-            output_rx,
+            output_rx: Some(output_rx),
             exited,
             child,
             _reader_thread: reader_thread,
@@ -557,7 +557,7 @@ impl PtyHandler {
         Ok(Self {
             pair,
             writer,
-            output_rx,
+            output_rx: Some(output_rx),
             exited,
             child,
             _reader_thread: reader_thread,
@@ -573,15 +573,15 @@ impl PtyHandler {
             .context("Failed to write to PTY (shell process may have exited)")
     }
 
-    /// Read any pending output from the PTY (non-blocking).
-    /// Collects all pending chunks into a single contiguous buffer to reduce
-    /// per-chunk allocation overhead and allow the caller to process data in one pass.
-    pub fn read_output(&self) -> Vec<u8> {
-        let mut output = Vec::with_capacity(32768);
-        while let Ok(data) = self.output_rx.try_recv() {
-            output.extend_from_slice(&data);
-        }
-        output
+    /// Take the PTY output receiver for use by the VT processing thread.
+    /// Returns `None` if already taken.
+    pub fn take_output_receiver(&mut self) -> Option<Receiver<Vec<u8>>> {
+        self.output_rx.take()
+    }
+
+    /// Get a clone of the exit flag for use by the VT processing thread.
+    pub fn exited_flag(&self) -> Arc<AtomicBool> {
+        self.exited.clone()
     }
 
     /// Check if the PTY process has exited

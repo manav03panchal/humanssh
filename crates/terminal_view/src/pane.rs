@@ -23,7 +23,11 @@ use terminal::PtyHandler;
 use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
 use theme::{terminal_colors, TerminalColors};
 
-use actions::{SearchNext, SearchPrev, SearchToggle, SendShiftTab, SendTab, OPTION_AS_ALT};
+use crate::copy_mode::CopyModeState;
+use actions::{
+    EnterCopyMode, ExitCopyMode, SearchNext, SearchPrev, SearchToggle, SearchToggleRegex,
+    SendShiftTab, SendTab, OPTION_AS_ALT,
+};
 use parking_lot::{Mutex, RwLock};
 use std::fmt::Write as FmtWrite;
 use std::sync::atomic::Ordering;
@@ -156,16 +160,13 @@ impl EventListener for Listener {
 #[derive(Clone, Debug)]
 pub struct TerminalExitEvent;
 
-/// In-buffer search state for the terminal.
 struct SearchState {
-    /// Whether the search bar is visible.
     active: bool,
-    /// Current search query.
     query: String,
-    /// Positions of all matches: Vec<(grid_line, start_col, end_col)>.
     matches: Vec<(i32, usize, usize)>,
-    /// Index of the currently highlighted match.
     current_match: usize,
+    regex_mode: bool,
+    compiled_regex: Option<regex::Regex>,
 }
 
 impl SearchState {
@@ -175,6 +176,20 @@ impl SearchState {
             query: String::new(),
             matches: Vec::new(),
             current_match: 0,
+            regex_mode: false,
+            compiled_regex: None,
+        }
+    }
+
+    fn recompile_regex(&mut self) {
+        if !self.regex_mode || self.query.is_empty() {
+            self.compiled_regex = None;
+            return;
+        }
+        let pattern = format!("(?i){}", &self.query);
+        match regex::Regex::new(&pattern) {
+            Ok(re) => self.compiled_regex = Some(re),
+            Err(_) => self.compiled_regex = None,
         }
     }
 }
@@ -191,8 +206,6 @@ pub struct TerminalPane {
     pty: Arc<Mutex<Option<PtyHandler>>>,
     /// Terminal emulator state (screen buffer, cursor, etc.)
     term: Arc<Mutex<Term<Listener>>>,
-    /// VTE parser for processing escape sequences
-    processor: Arc<Mutex<Processor>>,
     /// Event listener for terminal events (title changes, etc.)
     listener: Listener,
     /// Consolidated display state (size, cell_dims, bounds, font_size)
@@ -212,6 +225,10 @@ pub struct TerminalPane {
     font_fallbacks: Option<FontFallbacks>,
     /// Reverse scroll direction ("natural" scrolling)
     scroll_reverse: bool,
+    /// Vi-style copy mode state
+    copy_mode: CopyModeState,
+    /// Dedicated VT processing thread (kept alive for Drop cleanup)
+    _vt_processor: Option<terminal::TerminalProcessor>,
 }
 
 impl EventEmitter<TerminalExitEvent> for TerminalPane {}
@@ -268,10 +285,27 @@ impl TerminalPane {
             ))
         };
 
-        let pane = Self {
-            pty: Arc::new(Mutex::new(pty)),
+        let pty_arc = Arc::new(Mutex::new(pty));
+
+        // Inject error message before starting VT thread (so it appears immediately)
+        if let Some(error) = spawn_error {
+            let error_msg = format!(
+                "\x1b[31m\x1b[1mError: Failed to spawn shell\x1b[0m\r\n\r\n{}\r\n\r\n\
+                 \x1b[33mTroubleshooting:\x1b[0m\r\n\
+                 - Check that your shell exists: echo $SHELL\r\n\
+                 - Try setting SHELL=/bin/zsh or SHELL=/bin/bash\r\n",
+                error
+            );
+            let mut term_guard = term.lock();
+            let mut proc_guard = processor.lock();
+            proc_guard.advance(&mut *term_guard, error_msg.as_bytes());
+        }
+
+        let vt_processor = Self::start_vt_processor(&pty_arc, term.clone(), processor.clone(), cx);
+
+        Self {
+            pty: pty_arc,
             term,
-            processor,
             listener,
             display: Arc::new(RwLock::new(display_state)),
             dragging: false,
@@ -281,24 +315,9 @@ impl TerminalPane {
             hovered_url: None,
             font_fallbacks,
             scroll_reverse: user_config.scroll_reverse,
-        };
-
-        // Display error message in terminal if PTY spawn failed
-        if let Some(error) = spawn_error {
-            let error_msg = format!(
-                "\x1b[31m\x1b[1mError: Failed to spawn shell\x1b[0m\r\n\r\n{}\r\n\r\n\
-                 \x1b[33mTroubleshooting:\x1b[0m\r\n\
-                 - Check that your shell exists: echo $SHELL\r\n\
-                 - Try setting SHELL=/bin/zsh or SHELL=/bin/bash\r\n",
-                error
-            );
-            let mut term = pane.term.lock();
-            let mut processor = pane.processor.lock();
-            processor.advance(&mut *term, error_msg.as_bytes());
+            copy_mode: CopyModeState::new(size.rows as usize, size.cols as usize),
+            _vt_processor: vt_processor,
         }
-
-        pane.start_pty_polling(cx);
-        pane
     }
 
     /// Create a new terminal pane running a specific command.
@@ -339,10 +358,25 @@ impl TerminalPane {
             ))
         };
 
-        let pane = Self {
-            pty: Arc::new(Mutex::new(pty)),
+        let pty_arc = Arc::new(Mutex::new(pty));
+
+        // Inject error message before starting VT thread
+        if let Some(error) = spawn_error {
+            let error_msg = format!(
+                "\x1b[31m\x1b[1mError: Failed to run '{}'\x1b[0m\r\n\r\n{}\r\n\r\n\
+                 \x1b[33mTip:\x1b[0m Install the command with: brew install {}\r\n",
+                command, error, command
+            );
+            let mut term_guard = term.lock();
+            let mut proc_guard = processor.lock();
+            proc_guard.advance(&mut *term_guard, error_msg.as_bytes());
+        }
+
+        let vt_processor = Self::start_vt_processor(&pty_arc, term.clone(), processor.clone(), cx);
+
+        Self {
+            pty: pty_arc,
             term,
-            processor,
             listener,
             display: Arc::new(RwLock::new(display_state)),
             dragging: false,
@@ -352,38 +386,41 @@ impl TerminalPane {
             hovered_url: None,
             font_fallbacks,
             scroll_reverse: user_config.scroll_reverse,
-        };
-
-        if let Some(error) = spawn_error {
-            let error_msg = format!(
-                "\x1b[31m\x1b[1mError: Failed to run '{}'\x1b[0m\r\n\r\n{}\r\n\r\n\
-                 \x1b[33mTip:\x1b[0m Install the command with: brew install {}\r\n",
-                command, error, command
-            );
-            let mut term = pane.term.lock();
-            let mut processor = pane.processor.lock();
-            processor.advance(&mut *term, error_msg.as_bytes());
+            copy_mode: CopyModeState::new(size.rows as usize, size.cols as usize),
+            _vt_processor: vt_processor,
         }
-
-        pane.start_pty_polling(cx);
-        pane
     }
 
-    /// Start adaptive PTY output polling.
+    /// Start the dedicated VT processing thread and spawn a GPUI timer task
+    /// that polls the render-needed flag.
     ///
-    /// Uses short intervals (8ms / 125fps) when data is flowing, longer intervals
-    /// (100ms) when idle. This reduces CPU usage to near-zero when idle while
-    /// maintaining smooth output during activity.
-    fn start_pty_polling(&self, cx: &mut Context<Self>) {
-        let term_clone = self.term.clone();
-        let processor_clone = self.processor.clone();
-        let pty_clone = self.pty.clone();
+    /// Returns `None` if the PTY has no output receiver (already taken or no PTY).
+    fn start_vt_processor(
+        pty_arc: &Arc<Mutex<Option<PtyHandler>>>,
+        term: Arc<Mutex<Term<Listener>>>,
+        processor: Arc<Mutex<Processor>>,
+        cx: &mut Context<Self>,
+    ) -> Option<terminal::TerminalProcessor> {
+        let (output_rx, exited) = {
+            let mut pty_guard = pty_arc.lock();
+            if let Some(ref mut pty) = *pty_guard {
+                match pty.take_output_receiver() {
+                    Some(rx) => (rx, pty.exited_flag()),
+                    None => return None,
+                }
+            } else {
+                return None;
+            }
+        };
 
+        let vt_processor = terminal::TerminalProcessor::start(output_rx, term, processor, exited);
+
+        // Poll the VT thread's render-needed and exited flags via GPUI timer.
+        // Accesses `_vt_processor` through the entity, so no Arc sharing needed.
         cx.spawn(async move |this, cx| {
-            const ACTIVE_INTERVAL: u64 = 8; // 125fps when data flowing
-            const IDLE_INTERVAL: u64 = 100; // Slow when idle (save power)
-            const IDLE_THRESHOLD: u32 = 3; // Cycles without data before going idle
-
+            const ACTIVE_INTERVAL: u64 = 8;
+            const IDLE_INTERVAL: u64 = 100;
+            const IDLE_THRESHOLD: u32 = 3;
             let mut idle_count = 0u32;
 
             loop {
@@ -397,47 +434,42 @@ impl TerminalPane {
                     .timer(std::time::Duration::from_millis(interval))
                     .await;
 
-                let (should_notify, has_data, is_exited) = {
-                    let pty_guard = pty_clone.lock();
-                    if let Some(ref pty) = *pty_guard {
-                        let is_exited = pty.has_exited();
-                        let output = pty.read_output();
-                        drop(pty_guard);
-                        if !output.is_empty() {
-                            let mut term = term_clone.lock();
-                            let mut processor = processor_clone.lock();
-                            processor.advance(&mut *term, &output);
-                            (true, true, is_exited)
-                        } else {
-                            (is_exited, false, is_exited)
+                let should_break = this
+                    .update(cx, |pane, cx| {
+                        let vt = match pane._vt_processor.as_ref() {
+                            Some(vt) => vt,
+                            None => return (true, false),
+                        };
+                        let needs_render = vt.take_render_needed();
+                        let is_exited = vt.has_exited();
+                        if needs_render {
+                            cx.notify();
                         }
-                    } else {
-                        (true, false, true)
-                    }
-                };
+                        if is_exited && !pane.exit_emitted {
+                            pane.exit_emitted = true;
+                            cx.emit(TerminalExitEvent);
+                            return (true, needs_render);
+                        }
+                        (false, needs_render)
+                    })
+                    .unwrap_or((true, false));
 
-                if has_data {
+                let (should_exit, had_data) = should_break;
+
+                if had_data {
                     idle_count = 0;
                 } else {
                     idle_count = idle_count.saturating_add(1);
                 }
 
-                if should_notify {
-                    let _ = this.update(cx, |_, cx| cx.notify());
-                }
-
-                if is_exited {
-                    let _ = this.update(cx, |pane, cx| {
-                        if !pane.exit_emitted {
-                            pane.exit_emitted = true;
-                            cx.emit(TerminalExitEvent);
-                        }
-                    });
+                if should_exit {
                     break;
                 }
             }
         })
         .detach();
+
+        Some(vt_processor)
     }
 
     /// Send keyboard input to the PTY.
@@ -1015,12 +1047,13 @@ impl TerminalPane {
         }
     }
 
-    /// Find all matches of the query in the terminal buffer.
     fn find_matches(&mut self) {
         self.search.matches.clear();
         if self.search.query.is_empty() {
             return;
         }
+
+        self.search.recompile_regex();
 
         let term = self.term.lock();
         let grid = term.grid();
@@ -1028,35 +1061,60 @@ impl TerminalPane {
         let total_lines = grid.total_lines() as i32;
         let cols = grid.columns();
 
-        // Search from top of history to bottom of screen
         let start_line = -(total_lines - screen_lines);
 
-        let query_chars: Vec<char> = self.search.query.to_lowercase().chars().collect();
-        let query_len = query_chars.len();
+        if self.search.regex_mode {
+            let compiled = match self.search.compiled_regex.as_ref() {
+                Some(re) => re,
+                None => return,
+            };
 
-        for line_idx in start_line..screen_lines {
-            let row = &grid[Line(line_idx)];
-            let chars: Vec<char> = (0..cols).map(|c| row[Column(c)].c).collect();
+            for line_idx in start_line..screen_lines {
+                let row = &grid[Line(line_idx)];
+                let chars: Vec<char> = (0..cols).map(|c| row[Column(c)].c).collect();
+                let line_string: String = chars.iter().collect();
 
-            // Compare char-by-char at column indices (not byte positions)
-            // to stay aligned with the cell grid when multi-byte chars are present.
-            let mut col = 0;
-            while col + query_len <= chars.len() {
-                let found = chars[col..col + query_len]
-                    .iter()
-                    .zip(query_chars.iter())
-                    .all(|(grid_char, query_char)| {
-                        grid_char.to_lowercase().eq(query_char.to_lowercase())
-                    });
-
-                if found {
-                    self.search.matches.push((line_idx, col, col + query_len));
+                let mut byte_to_col: Vec<usize> = Vec::with_capacity(line_string.len() + 1);
+                for (col_idx, ch) in chars.iter().enumerate() {
+                    for _ in 0..ch.len_utf8() {
+                        byte_to_col.push(col_idx);
+                    }
                 }
-                col += 1;
+                byte_to_col.push(chars.len());
+
+                for matched in compiled.find_iter(&line_string) {
+                    let start_col = byte_to_col[matched.start()];
+                    let end_col = byte_to_col[matched.end()];
+                    if start_col < end_col {
+                        self.search.matches.push((line_idx, start_col, end_col));
+                    }
+                }
+            }
+        } else {
+            let query_chars: Vec<char> = self.search.query.to_lowercase().chars().collect();
+            let query_len = query_chars.len();
+
+            for line_idx in start_line..screen_lines {
+                let row = &grid[Line(line_idx)];
+                let chars: Vec<char> = (0..cols).map(|c| row[Column(c)].c).collect();
+
+                let mut col = 0;
+                while col + query_len <= chars.len() {
+                    let found = chars[col..col + query_len]
+                        .iter()
+                        .zip(query_chars.iter())
+                        .all(|(grid_char, query_char)| {
+                            grid_char.to_lowercase().eq(query_char.to_lowercase())
+                        });
+
+                    if found {
+                        self.search.matches.push((line_idx, col, col + query_len));
+                    }
+                    col += 1;
+                }
             }
         }
 
-        // Reset current match index
         if !self.search.matches.is_empty() {
             self.search.current_match = 0;
         }
@@ -1068,11 +1126,18 @@ impl TerminalPane {
         if !self.search.active {
             self.search.query.clear();
             self.search.matches.clear();
+            self.search.compiled_regex = None;
         }
         cx.notify();
     }
 
-    /// Move to the next match.
+    fn toggle_regex(&mut self, cx: &mut Context<Self>) {
+        self.search.regex_mode = !self.search.regex_mode;
+        self.search.recompile_regex();
+        self.find_matches();
+        cx.notify();
+    }
+
     fn search_next(&mut self, cx: &mut Context<Self>) {
         if !self.search.matches.is_empty() {
             self.search.current_match = (self.search.current_match + 1) % self.search.matches.len();
@@ -1090,6 +1155,95 @@ impl TerminalPane {
             };
             self.scroll_to_match(cx);
         }
+    }
+
+    fn enter_copy_mode(&mut self, cx: &mut Context<Self>) {
+        if self.copy_mode.active {
+            return;
+        }
+        let term = self.term.lock();
+        let cursor = term.grid().cursor.point;
+        let display_offset = term.grid().display_offset();
+        let rows = term.grid().screen_lines();
+        let cols = term.grid().columns();
+        drop(term);
+        self.copy_mode.update_dimensions(rows, cols);
+        // Place cursor at the terminal cursor's visible position
+        let visual_row = (cursor.line.0 + display_offset as i32).max(0) as usize;
+        self.copy_mode.enter(visual_row, cursor.column.0);
+        cx.notify();
+    }
+
+    fn exit_copy_mode(&mut self, cx: &mut Context<Self>) {
+        self.copy_mode.cancel();
+        cx.notify();
+    }
+
+    fn handle_copy_mode_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
+
+        match key {
+            "escape" => self.copy_mode.cancel(),
+            "h" if !mods.control => self.copy_mode.move_left(),
+            "j" if !mods.control => self.copy_mode.move_down(),
+            "k" if !mods.control => self.copy_mode.move_up(),
+            "l" if !mods.control => self.copy_mode.move_right(),
+            "0" => self.copy_mode.move_to_line_start(),
+            "4" if mods.shift => self.copy_mode.move_to_line_end(), // $
+            "g" if !mods.control => self.copy_mode.move_to_top(),   // gg (simplified)
+            "g" if mods.shift => self.copy_mode.move_to_bottom(),   // G
+            "u" if mods.control => {
+                let page = self.copy_mode.grid_rows / 2;
+                self.copy_mode.page_up(page);
+            }
+            "d" if mods.control => {
+                let page = self.copy_mode.grid_rows / 2;
+                self.copy_mode.page_down(page);
+            }
+            "v" if !mods.control && !mods.shift => {
+                self.copy_mode
+                    .toggle_selection_type(crate::copy_mode::CopyModeSelection::Character);
+            }
+            "v" if mods.shift => {
+                self.copy_mode
+                    .toggle_selection_type(crate::copy_mode::CopyModeSelection::Line);
+            }
+            "v" if mods.control => {
+                self.copy_mode
+                    .toggle_selection_type(crate::copy_mode::CopyModeSelection::Block);
+            }
+            "y" if !mods.control => {
+                // Yank selected text to clipboard
+                let grid = self.build_copy_mode_grid();
+                let text = self.copy_mode.extract_text(&grid);
+                if !text.is_empty() {
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                }
+                self.copy_mode.cancel();
+            }
+            _ => {} // Ignore unbound keys
+        }
+        cx.notify();
+    }
+
+    /// Build a grid of chars from the terminal for copy mode text extraction.
+    fn build_copy_mode_grid(&self) -> Vec<Vec<char>> {
+        let term = self.term.lock();
+        let rows = term.grid().screen_lines();
+        let cols = term.grid().columns();
+        let display_offset = term.grid().display_offset();
+        let mut grid = Vec::with_capacity(rows);
+        for row_idx in 0..rows {
+            let line = alacritty_terminal::index::Line(row_idx as i32 - display_offset as i32);
+            let mut row = Vec::with_capacity(cols);
+            for col_idx in 0..cols {
+                let col = alacritty_terminal::index::Column(col_idx);
+                row.push(term.grid()[line][col].c);
+            }
+            grid.push(row);
+        }
+        grid
     }
 
     /// Scroll the terminal to make the current match visible.
@@ -1848,7 +2002,22 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &SearchPrev, _window, cx| {
                 this.search_prev(cx);
             }))
+            .on_action(cx.listener(|this, _: &SearchToggleRegex, _window, cx| {
+                this.toggle_regex(cx);
+            }))
+            .on_action(cx.listener(|this, _: &EnterCopyMode, _window, cx| {
+                this.enter_copy_mode(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExitCopyMode, _window, cx| {
+                this.exit_copy_mode(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                // When copy mode is active, route keys to copy mode handler
+                if this.copy_mode.active {
+                    this.handle_copy_mode_key(event, cx);
+                    return;
+                }
+
                 // When search is active, route typing to search query
                 if this.search.active {
                     let key = event.keystroke.key.as_str();
@@ -2040,9 +2209,19 @@ impl Render for TerminalPane {
                     )
                 };
                 let query_display = if self.search.query.is_empty() {
-                    "Search...".to_string()
+                    if self.search.regex_mode {
+                        "Regex...".to_string()
+                    } else {
+                        "Search...".to_string()
+                    }
                 } else {
                     self.search.query.clone()
+                };
+                let regex_mode = self.search.regex_mode;
+                let regex_color = if regex_mode {
+                    hsla(0.55, 0.6, 0.65, 1.0)
+                } else {
+                    hsla(0.0, 0.0, 0.4, 1.0)
                 };
                 d.child(
                     div()
@@ -2050,7 +2229,7 @@ impl Render for TerminalPane {
                         .absolute()
                         .top(px(0.0))
                         .right(px(0.0))
-                        .w(px(320.0))
+                        .w(px(350.0))
                         .h(px(36.0))
                         .bg(hsla(0.0, 0.0, 0.15, 0.95))
                         .border_1()
@@ -2060,6 +2239,15 @@ impl Render for TerminalPane {
                         .items_center()
                         .px(px(8.0))
                         .gap(px(4.0))
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(regex_color)
+                                .when(regex_mode, |d| {
+                                    d.bg(hsla(0.55, 0.3, 0.2, 1.0)).rounded(px(2.0)).px(px(3.0))
+                                })
+                                .child(".*"),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -3402,5 +3590,195 @@ mod tests {
             TerminalPane::find_url_at_position(line, 15),
             Some("http://localhost:8080/api".to_string())
         );
+    }
+
+    // ============================================================================
+    // Search State Tests
+    // ============================================================================
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_default() {
+        let state = SearchState::new();
+        assert!(!state.active);
+        assert!(state.query.is_empty());
+        assert!(state.matches.is_empty());
+        assert_eq!(state.current_match, 0);
+        assert!(!state.regex_mode);
+        assert!(state.compiled_regex.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_recompile_regex_valid_pattern() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = "foo.*bar".to_string();
+        state.recompile_regex();
+        assert!(state.compiled_regex.is_some());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_recompile_regex_invalid_pattern() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = "[invalid(regex".to_string();
+        state.recompile_regex();
+        assert!(state.compiled_regex.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_recompile_regex_empty_query() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = String::new();
+        state.recompile_regex();
+        assert!(state.compiled_regex.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_recompile_regex_not_in_regex_mode() {
+        let mut state = SearchState::new();
+        state.regex_mode = false;
+        state.query = "foo".to_string();
+        state.recompile_regex();
+        assert!(state.compiled_regex.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_is_case_insensitive() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = "hello".to_string();
+        state.recompile_regex();
+        let re = state.compiled_regex.as_ref().unwrap();
+        assert!(re.is_match("HELLO"));
+        assert!(re.is_match("Hello"));
+        assert!(re.is_match("hello"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_character_class() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = r"\d+".to_string();
+        state.recompile_regex();
+        let re = state.compiled_regex.as_ref().unwrap();
+        assert!(re.is_match("abc123def"));
+        assert!(!re.is_match("abcdef"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_alternation() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = "foo|bar".to_string();
+        state.recompile_regex();
+        let re = state.compiled_regex.as_ref().unwrap();
+        assert!(re.is_match("foo"));
+        assert!(re.is_match("bar"));
+        assert!(!re.is_match("baz"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_find_positions() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = r"h.llo".to_string();
+        state.recompile_regex();
+        let re = state.compiled_regex.as_ref().unwrap();
+        let text = "hello world";
+        let matched = re.find(text).unwrap();
+        assert_eq!(matched.start(), 0);
+        assert_eq!(matched.end(), 5);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_multibyte_byte_to_col_mapping() {
+        let chars: Vec<char> = "ab\u{00E9}cd".chars().collect();
+        let line_string: String = chars.iter().collect();
+
+        let mut byte_to_col: Vec<usize> = Vec::new();
+        for (col_idx, ch) in chars.iter().enumerate() {
+            for _ in 0..ch.len_utf8() {
+                byte_to_col.push(col_idx);
+            }
+        }
+        byte_to_col.push(chars.len());
+
+        // 'a' at byte 0 -> col 0
+        assert_eq!(byte_to_col[0], 0);
+        // 'b' at byte 1 -> col 1
+        assert_eq!(byte_to_col[1], 1);
+        // '\u{00E9}' takes 2 bytes, starts at byte 2 -> col 2
+        assert_eq!(byte_to_col[2], 2);
+        assert_eq!(byte_to_col[3], 2);
+        // 'c' at byte 4 -> col 3
+        assert_eq!(byte_to_col[4], 3);
+        // 'd' at byte 5 -> col 4
+        assert_eq!(byte_to_col[5], 4);
+
+        let re = regex::Regex::new(r"\u{00E9}c").unwrap();
+        let matched = re.find(&line_string).unwrap();
+        let start_col = byte_to_col[matched.start()];
+        let end_col = byte_to_col[matched.end()];
+        assert_eq!(start_col, 2);
+        assert_eq!(end_col, 4);
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_toggle_clears_compiled() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = "test".to_string();
+        state.recompile_regex();
+        assert!(state.compiled_regex.is_some());
+
+        state.regex_mode = false;
+        state.recompile_regex();
+        assert!(state.compiled_regex.is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_multiple_matches_in_line() {
+        let mut state = SearchState::new();
+        state.regex_mode = true;
+        state.query = r"\d+".to_string();
+        state.recompile_regex();
+        let re = state.compiled_regex.as_ref().unwrap();
+
+        let text = "abc 123 def 456 ghi";
+        let matches: Vec<_> = re.find_iter(text).collect();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].as_str(), "123");
+        assert_eq!(matches[1].as_str(), "456");
+    }
+
+    #[::core::prelude::v1::test]
+    fn test_search_state_regex_empty_match_skipped() {
+        let chars: Vec<char> = "hello".chars().collect();
+        let line_string: String = chars.iter().collect();
+
+        let mut byte_to_col: Vec<usize> = Vec::new();
+        for (col_idx, ch) in chars.iter().enumerate() {
+            for _ in 0..ch.len_utf8() {
+                byte_to_col.push(col_idx);
+            }
+        }
+        byte_to_col.push(chars.len());
+
+        // A regex like "h?" could match empty string, but we only push
+        // matches where start_col < end_col
+        let re = regex::Regex::new("(?i)h?").unwrap();
+        let mut results = Vec::new();
+        for matched in re.find_iter(&line_string) {
+            let start_col = byte_to_col[matched.start()];
+            let end_col = byte_to_col[matched.end()];
+            if start_col < end_col {
+                results.push((start_col, end_col));
+            }
+        }
+        assert!(results.contains(&(0, 1)));
+        for (start, end) in &results {
+            assert!(start < end);
+        }
     }
 }

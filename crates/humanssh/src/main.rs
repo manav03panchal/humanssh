@@ -3,9 +3,9 @@
 //! Main entry point for the application.
 
 use actions::{
-    ClosePane, CloseTab, FocusNextPane, FocusPrevPane, NewTab, NextTab, OpenSettings, PrevTab,
-    Quit, SearchNext, SearchPrev, SearchToggle, SendShiftTab, SendTab, SplitHorizontal,
-    SplitVertical, ToggleOptionAsAlt, ToggleSecureInput,
+    ClosePane, CloseTab, EnterCopyMode, ExitCopyMode, FocusNextPane, FocusPrevPane, NewTab,
+    NextTab, OpenSettings, PrevTab, Quit, SearchNext, SearchPrev, SearchToggle, SearchToggleRegex,
+    SendShiftTab, SendTab, SplitHorizontal, SplitVertical, ToggleOptionAsAlt, ToggleSecureInput,
 };
 use anyhow::{Context, Result};
 use gpui::*;
@@ -245,8 +245,12 @@ fn register_keybindings(cx: &mut App) {
         // Search
         KeyBinding::new("cmd-f", SearchToggle, Some("terminal")),
         KeyBinding::new("ctrl-f", SearchToggle, Some("terminal")),
+        KeyBinding::new("cmd-alt-r", SearchToggleRegex, Some("terminal")),
+        KeyBinding::new("alt-r", SearchToggleRegex, Some("terminal")),
         KeyBinding::new("cmd-g", SearchNext, Some("terminal")),
         KeyBinding::new("cmd-shift-g", SearchPrev, Some("terminal")),
+        // Copy mode
+        KeyBinding::new("cmd-shift-c", EnterCopyMode, Some("terminal")),
     ]);
 
     // Apply user custom keybindings (these override defaults since GPUI uses last-wins)
@@ -287,6 +291,11 @@ fn apply_custom_keybindings(config: &settings::Config, cx: &mut App) {
             "search" => bindings.push(KeyBinding::new(keys, SearchToggle, context)),
             "search-next" => bindings.push(KeyBinding::new(keys, SearchNext, context)),
             "search-prev" => bindings.push(KeyBinding::new(keys, SearchPrev, context)),
+            "search-toggle-regex" => {
+                bindings.push(KeyBinding::new(keys, SearchToggleRegex, context))
+            }
+            "enter-copy-mode" => bindings.push(KeyBinding::new(keys, EnterCopyMode, context)),
+            "exit-copy-mode" => bindings.push(KeyBinding::new(keys, ExitCopyMode, context)),
             other => {
                 tracing::warn!("Unknown keybinding action: '{}'", other);
             }

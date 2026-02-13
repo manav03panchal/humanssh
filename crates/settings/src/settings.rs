@@ -6,6 +6,6 @@ pub mod constants;
 pub mod file;
 
 pub use file::{
-    apply_config, config_path, ensure_config_file, load_config, watch_config, Config,
-    KeybindingEntry,
+    apply_config, config_path, ensure_config_file, load_config, watch_config, AutoSwitchRule,
+    Config, KeybindingEntry, MergedProfileConfig, Profile,
 };
