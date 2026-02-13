@@ -973,18 +973,28 @@ impl TerminalPane {
         // Search from top of history to bottom of screen
         let start_line = -(total_lines - screen_lines);
 
+        let query_chars: Vec<char> = self.search.query.to_lowercase().chars().collect();
+        let query_len = query_chars.len();
+
         for line_idx in start_line..screen_lines {
             let row = &grid[Line(line_idx)];
-            let text: String = (0..cols).map(|c| row[Column(c)].c).collect();
-            let text_lower = text.to_lowercase();
-            let query_lower = self.search.query.to_lowercase();
+            let chars: Vec<char> = (0..cols).map(|c| row[Column(c)].c).collect();
 
-            let mut search_from = 0;
-            while let Some(pos) = text_lower[search_from..].find(&query_lower) {
-                let start = search_from + pos;
-                let end = start + self.search.query.len();
-                self.search.matches.push((line_idx, start, end));
-                search_from = start + 1;
+            // Compare char-by-char at column indices (not byte positions)
+            // to stay aligned with the cell grid when multi-byte chars are present.
+            let mut col = 0;
+            while col + query_len <= chars.len() {
+                let found = chars[col..col + query_len]
+                    .iter()
+                    .zip(query_chars.iter())
+                    .all(|(grid_char, query_char)| {
+                        grid_char.to_lowercase().eq(query_char.to_lowercase())
+                    });
+
+                if found {
+                    self.search.matches.push((line_idx, col, col + query_len));
+                }
+                col += 1;
             }
         }
 
