@@ -1,3 +1,4 @@
+#![recursion_limit = "2048"]
 //! Terminal GPUI view layer.
 //!
 //! Rendering, input handling, and color conversion for the terminal.
@@ -7,4 +8,4 @@ pub mod copy_mode;
 pub mod kitty_keyboard;
 mod pane;
 
-pub use pane::{TerminalExitEvent, TerminalPane};
+pub use pane::{TabBadge, TerminalExitEvent, TerminalPane};

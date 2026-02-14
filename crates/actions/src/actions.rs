@@ -37,6 +37,9 @@ actions!(humanssh, [ToggleCommandPalette]);
 // Scratchpad (persistent notes overlay)
 actions!(humanssh, [ToggleScratchpad]);
 
+// Recording & replay
+actions!(humanssh, [StartRecording, StopRecording, OpenReplay]);
+
 // Terminal-specific actions to capture keys before GPUI's focus system
 actions!(terminal, [SendTab, SendShiftTab]);
 

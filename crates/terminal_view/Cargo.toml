@@ -11,6 +11,7 @@ doctest = false
 
 [dependencies]
 terminal.workspace = true
+platform.workspace = true
 theme.workspace = true
 settings.workspace = true
 actions.workspace = true

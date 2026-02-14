@@ -120,6 +120,21 @@ fn build_command_entries() -> Vec<CommandEntry> {
             action: Box::new(ToggleScratchpad),
         },
         CommandEntry {
+            label: "Start Recording",
+            shortcut: "",
+            action: Box::new(StartRecording),
+        },
+        CommandEntry {
+            label: "Stop Recording",
+            shortcut: "",
+            action: Box::new(StopRecording),
+        },
+        CommandEntry {
+            label: "Open Replay",
+            shortcut: "",
+            action: Box::new(OpenReplay),
+        },
+        CommandEntry {
             label: "Quit",
             shortcut: "Cmd+Q",
             action: Box::new(Quit),
@@ -283,7 +298,6 @@ impl Render for CommandPalette {
         let query_is_empty = self.query.is_empty();
 
         let max_visible = 12;
-        let visible_count = self.filtered_indices.len().min(max_visible);
 
         div()
             .track_focus(&self.focus_handle)
@@ -339,7 +353,7 @@ impl Render for CommandPalette {
             .child(
                 div()
                     .mt(px(60.0))
-                    .w(px(480.0))
+                    .w(px(520.0))
                     .bg(hsla(0.0, 0.0, 0.10, 1.0))
                     .border_1()
                     .border_color(hsla(0.0, 0.0, 0.25, 1.0))
@@ -377,52 +391,53 @@ impl Render for CommandPalette {
                     )
                     .child(
                         div()
+                            .id("palette-results")
                             .max_h(px(max_visible as f32 * 32.0))
-                            .overflow_hidden()
-                            .children(
-                                self.filtered_indices
-                                    .iter()
-                                    .take(visible_count)
-                                    .enumerate()
-                                    .map(|(visible_idx, &entry_idx)| {
-                                        let is_selected = visible_idx == self.selected_index;
-                                        let entry = &self.entries[entry_idx];
-                                        let label: SharedString = entry.label.into();
-                                        let shortcut: SharedString = entry.shortcut.into();
-                                        let has_shortcut = !entry.shortcut.is_empty();
+                            .overflow_y_scroll()
+                            .scrollbar_width(px(4.0))
+                            .children(self.filtered_indices.iter().enumerate().map(
+                                |(visible_idx, &entry_idx)| {
+                                    let is_selected = visible_idx == self.selected_index;
+                                    let entry = &self.entries[entry_idx];
+                                    let label: SharedString = entry.label.into();
+                                    let shortcut: SharedString = entry.shortcut.into();
+                                    let has_shortcut = !entry.shortcut.is_empty();
 
-                                        div()
-                                            .id(ElementId::Name(
-                                                format!("cmd-{}", entry_idx).into(),
-                                            ))
-                                            .h(px(32.0))
-                                            .w_full()
-                                            .px(px(12.0))
-                                            .flex()
-                                            .items_center()
-                                            .justify_between()
-                                            .cursor_pointer()
-                                            .when(is_selected, |d| d.bg(hsla(0.0, 0.0, 0.18, 1.0)))
-                                            .when(!is_selected, |d| {
-                                                d.hover(|d| d.bg(hsla(0.0, 0.0, 0.14, 1.0)))
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.selected_index = visible_idx;
-                                                this.confirm(cx);
-                                            }))
-                                            .child(
-                                                div().text_sm().text_color(foreground).child(label),
+                                    div()
+                                        .id(ElementId::Name(format!("cmd-{}", entry_idx).into()))
+                                        .h(px(32.0))
+                                        .w_full()
+                                        .px(px(12.0))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .cursor_pointer()
+                                        .when(is_selected, |d| d.bg(hsla(0.0, 0.0, 0.18, 1.0)))
+                                        .when(!is_selected, |d| {
+                                            d.hover(|d| d.bg(hsla(0.0, 0.0, 0.14, 1.0)))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.selected_index = visible_idx;
+                                            this.confirm(cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_sm()
+                                                .text_color(foreground)
+                                                .child(label),
+                                        )
+                                        .when(has_shortcut, |d| {
+                                            d.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_size(px(11.0))
+                                                    .text_color(muted)
+                                                    .child(shortcut),
                                             )
-                                            .when(has_shortcut, |d| {
-                                                d.child(
-                                                    div()
-                                                        .text_size(px(11.0))
-                                                        .text_color(muted)
-                                                        .child(shortcut),
-                                                )
-                                            })
-                                    }),
-                            ),
+                                        })
+                                },
+                            )),
                     )
                     .when(self.filtered_indices.is_empty(), |d| {
                         d.child(

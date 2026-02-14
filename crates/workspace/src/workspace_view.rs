@@ -6,8 +6,8 @@ use crate::pane_group::{PaneNode, SplitDirection};
 use crate::scratchpad::ScratchpadState;
 use crate::status_bar::{render_status_bar, stats_collector, SystemStats};
 use actions::{
-    ClosePane, CloseTab, FocusNextPane, FocusPrevPane, NewTab, NextTab, OpenSettings, PrevTab,
-    Quit, SplitHorizontal, SplitVertical, ToggleCommandPalette, ToggleScratchpad,
+    ClosePane, CloseTab, FocusNextPane, FocusPrevPane, NewTab, NextTab, OpenReplay, OpenSettings,
+    PrevTab, Quit, SplitHorizontal, SplitVertical, ToggleCommandPalette, ToggleScratchpad,
 };
 use gpui::prelude::FluentBuilder;
 use gpui::{
@@ -20,7 +20,7 @@ use gpui_component::Root;
 use settings::constants::timing;
 #[cfg(not(test))]
 use terminal_view::TerminalExitEvent;
-use terminal_view::TerminalPane;
+use terminal_view::{TabBadge, TerminalPane};
 use theme::terminal_colors;
 use uuid::Uuid;
 
@@ -73,6 +73,17 @@ impl Tab {
                 .unwrap_or_else(|| self.fallback_title.clone())
         } else {
             self.fallback_title.clone()
+        };
+
+        // Prepend recording indicator if the active pane is recording
+        let base_title = if let Some(pane) = self.panes.find_pane(self.active_pane) {
+            if pane.is_recording(cx) {
+                format!("[REC] {}", base_title).into()
+            } else {
+                base_title
+            }
+        } else {
+            base_title
         };
 
         // Append progress percentage if the active pane has an active progress bar
@@ -387,6 +398,65 @@ impl Workspace {
         let tab = Tab {
             id: Uuid::new_v4(),
             fallback_title: title_owned,
+            panes,
+            active_pane,
+        };
+        self.tabs.push(tab);
+        self.active_tab = self.tabs.len() - 1;
+        cx.notify();
+    }
+
+    /// Open a replay tab for the most recent .cast recording.
+    fn open_replay(&mut self, cx: &mut Context<Self>) {
+        let recordings_dir = match terminal::recording::recordings_directory() {
+            Ok(dir) => dir,
+            Err(error) => {
+                tracing::warn!("Cannot determine recordings directory: {}", error);
+                return;
+            }
+        };
+
+        let mut entries: Vec<_> = match std::fs::read_dir(&recordings_dir) {
+            Ok(reader) => reader
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "cast"))
+                .collect(),
+            Err(error) => {
+                tracing::info!("No recordings directory: {}", error);
+                return;
+            }
+        };
+
+        entries.sort_by_key(|entry| {
+            std::cmp::Reverse(entry.metadata().ok().and_then(|m| m.modified().ok()))
+        });
+
+        let Some(path) = entries.first().map(|entry| entry.path()) else {
+            tracing::info!("No recordings found in {:?}", recordings_dir);
+            return;
+        };
+
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "Replay".to_string());
+
+        tracing::info!("Opening replay: {:?}", path);
+
+        let replay_path = path;
+        let terminal = cx.new(move |cx| {
+            TerminalPane::new_replay(cx, replay_path).unwrap_or_else(|error| {
+                tracing::error!("Failed to open replay: {}", error);
+                TerminalPane::new(cx)
+            })
+        });
+
+        let panes = PaneNode::new_leaf(terminal.into());
+        let active_pane = panes.first_leaf_id();
+
+        let tab = Tab {
+            id: Uuid::new_v4(),
+            fallback_title: format!("Replay: {}", file_name).into(),
             panes,
             active_pane,
         };
@@ -799,6 +869,10 @@ impl Render for Workspace {
                 if this.has_active_overlay() { return; }
                 this.new_tab(cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenReplay, _window, cx| {
+                if this.has_active_overlay() { return; }
+                this.open_replay(cx);
+            }))
             .on_action(cx.listener(|this, _: &NextTab, _window, cx| {
                 if this.has_active_overlay() { return; }
                 this.next_tab(cx);
@@ -935,13 +1009,34 @@ impl Render for Workspace {
                             .on_click(cx.listener(move |this, _: &ClickEvent, _window, cx| {
                                 this.switch_tab(i, cx);
                             }))
-                            .child(
+                            .child({
+                                let badge = tab.panes.find_pane(tab.active_pane)
+                                    .map(|pane_kind| pane_kind.badge(cx))
+                                    .unwrap_or(TabBadge::Running);
+                                let (badge_color, badge_text) = match badge {
+                                    TabBadge::Running => (hsla(0.33, 0.7, 0.5, 1.0), "\u{25CF}"),
+                                    TabBadge::Success => (hsla(0.33, 0.7, 0.5, 0.7), "\u{2713}"),
+                                    TabBadge::Failed(_) => (hsla(0.0, 0.7, 0.5, 1.0), "\u{2717}"),
+                                };
                                 div()
-                                    .text_sm()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.0))
                                     .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .child(title),
-                            )
+                                    .child(
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(badge_color)
+                                            .child(badge_text),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .overflow_hidden()
+                                            .whitespace_nowrap()
+                                            .child(title),
+                                    )
+                            })
                             .child(
                                 div()
                                     .id(ElementId::Name(format!("close-{}", tab_id).into()))

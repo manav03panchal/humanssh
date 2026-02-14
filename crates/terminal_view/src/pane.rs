@@ -12,7 +12,7 @@ use alacritty_terminal::index::{Column, Line, Point as TermPoint, Side};
 use alacritty_terminal::selection::{Selection as TermSelection, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{CursorShape, Processor};
+use alacritty_terminal::vte::ansi::{CursorShape, Processor, Rgb};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::ActiveTheme;
@@ -24,10 +24,75 @@ use terminal::PtyHandler;
 use termwiz::input::{KeyCode, KeyCodeEncodeModes, KeyboardEncoding, Modifiers as TermwizMods};
 use theme::{terminal_colors, TerminalColors};
 
+/// Visual badge state for tab annotations.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TabBadge {
+    /// Process is running
+    Running,
+    /// Process exited successfully (code 0)
+    Success,
+    /// Process exited with error
+    Failed(i32),
+}
+
+/// Replay playback state for a loaded .cast recording.
+pub struct ReplayState {
+    events: Vec<terminal::recording::ReplayEvent>,
+    current_index: usize,
+    speed: f32,
+    playing: bool,
+    /// Total duration of the recording in seconds.
+    total_duration: f64,
+    /// Current playback position in seconds (virtual time).
+    position: f64,
+}
+
+impl ReplayState {
+    fn new(events: Vec<terminal::recording::ReplayEvent>) -> Self {
+        let total_duration = events.last().map(|e| e.timestamp).unwrap_or(0.0);
+        Self {
+            events,
+            current_index: 0,
+            speed: 1.0,
+            playing: true,
+            total_duration,
+            position: 0.0,
+        }
+    }
+
+    fn toggle_play(&mut self) {
+        self.playing = !self.playing;
+    }
+
+    fn set_speed(&mut self, speed: f32) {
+        self.speed = speed.clamp(0.25, 8.0);
+    }
+
+    fn progress_fraction(&self) -> f32 {
+        if self.total_duration <= 0.0 {
+            return 1.0;
+        }
+        (self.position / self.total_duration).min(1.0) as f32
+    }
+
+    fn is_finished(&self) -> bool {
+        self.current_index >= self.events.len()
+    }
+
+    /// Seek to a fraction (0.0..=1.0) of the total duration.
+    /// Sets position and rewinds current_index so the timer replays from the right spot.
+    fn seek_fraction(&mut self, fraction: f32) {
+        let fraction = fraction.clamp(0.0, 1.0) as f64;
+        self.position = self.total_duration * fraction;
+        // Rewind index to the first event at or after the new position
+        self.current_index = self.events.partition_point(|e| e.timestamp < self.position);
+    }
+}
+
 use crate::copy_mode::CopyModeState;
 use actions::{
     EnterCopyMode, ExitCopyMode, SearchNext, SearchPrev, SearchToggle, SearchToggleRegex,
-    SendShiftTab, SendTab, OPTION_AS_ALT,
+    SendShiftTab, SendTab, StartRecording, StopRecording, OPTION_AS_ALT,
 };
 use parking_lot::{Mutex, RwLock};
 use std::fmt::Write as FmtWrite;
@@ -129,28 +194,51 @@ struct Listener {
     /// Line number of the most recent prompt start (OSC 133;A).
     /// Used for prompt-to-prompt navigation and command output selection.
     last_prompt_line: Arc<Mutex<Option<i32>>>,
+    /// PTY handle for writing terminal query responses back (CSI 6n, OSC 11, etc.)
+    pty: Arc<Mutex<Option<PtyHandler>>>,
 }
 
 impl Listener {
-    fn new() -> Self {
+    fn new(pty: Arc<Mutex<Option<PtyHandler>>>) -> Self {
         Self {
             title: Arc::new(Mutex::new(None)),
             cwd: Arc::new(Mutex::new(None)),
             last_prompt_line: Arc::new(Mutex::new(None)),
+            pty,
+        }
+    }
+
+    fn pty_write(&self, data: &[u8]) {
+        let mut pty_guard = self.pty.lock();
+        if let Some(ref mut pty) = *pty_guard {
+            if let Err(e) = pty.write(data) {
+                tracing::warn!(error = %e, "PTY write-back failed");
+            }
         }
     }
 }
 
 impl EventListener for Listener {
     fn send_event(&self, event: Event) {
-        // alacritty_terminal 0.25 / vte 0.15 emit Title, ResetTitle, Bell,
-        // Wakeup, ClipboardStore/Load, etc.  OSC 7 (CWD) and OSC 133
-        // (semantic prompts) are NOT emitted — they require a custom
-        // pre-parser on the raw PTY byte stream.  When that pre-parser is
-        // added, it will write directly to `self.cwd` / `self.last_prompt_line`.
         match event {
             Event::Title(title) => *self.title.lock() = Some(title),
             Event::ResetTitle => *self.title.lock() = None,
+            Event::PtyWrite(text) => self.pty_write(text.as_bytes()),
+            Event::ColorRequest(_index, formatter) => {
+                // Respond with dark background color for OSC 10/11/12 queries.
+                // TUI apps (BubbleTea/lipgloss) use this to detect dark/light mode.
+                let response = formatter(Rgb { r: 0, g: 0, b: 0 });
+                self.pty_write(response.as_bytes());
+            }
+            Event::TextAreaSizeRequest(formatter) => {
+                let response = formatter(alacritty_terminal::event::WindowSize {
+                    num_lines: 24,
+                    num_cols: 80,
+                    cell_width: 8,
+                    cell_height: 16,
+                });
+                self.pty_write(response.as_bytes());
+            }
             _ => {}
         }
     }
@@ -232,6 +320,8 @@ pub struct TerminalPane {
     _vt_processor: Option<terminal::TerminalProcessor>,
     /// Progress bar state from OSC 9;4 sequences
     progress: ProgressState,
+    /// Replay state (Some when this pane is playing back a .cast recording).
+    replay: Option<ReplayState>,
 }
 
 impl EventEmitter<TerminalExitEvent> for TerminalPane {}
@@ -258,14 +348,7 @@ impl TerminalPane {
         let display_state = DisplayState::default();
         let size = display_state.size;
 
-        // Create terminal with config and event listener
-        let listener = Listener::new();
-        let config = Config::default();
-        let term = Term::new(config, &size, listener.clone());
-        let term = Arc::new(Mutex::new(term));
-        let processor = Arc::new(Mutex::new(Processor::new()));
-
-        // Spawn PTY
+        // Spawn PTY first so Listener can hold a write-back reference
         let (pty, spawn_error) =
             match PtyHandler::spawn_in_dir(size.rows, size.cols, working_dir.as_deref()) {
                 Ok(pty) => (Some(pty), None),
@@ -274,6 +357,14 @@ impl TerminalPane {
                     (None, Some(e.to_string()))
                 }
             };
+        let pty_arc = Arc::new(Mutex::new(pty));
+
+        // Create terminal with config and event listener
+        let listener = Listener::new(pty_arc.clone());
+        let config = Config::default();
+        let term = Term::new(config, &size, listener.clone());
+        let term = Arc::new(Mutex::new(term));
+        let processor = Arc::new(Mutex::new(Processor::new()));
 
         // Disable tab stop so Tab key passes through to the terminal instead of
         // being consumed by GPUI's focus navigation system
@@ -287,8 +378,6 @@ impl TerminalPane {
                 user_config.font_fallbacks.clone(),
             ))
         };
-
-        let pty_arc = Arc::new(Mutex::new(pty));
 
         // Inject error message before starting VT thread (so it appears immediately)
         if let Some(error) = spawn_error {
@@ -321,6 +410,7 @@ impl TerminalPane {
             copy_mode: CopyModeState::new(size.rows as usize, size.cols as usize),
             _vt_processor: vt_processor,
             progress: ProgressState::default(),
+            replay: None,
         }
     }
 
@@ -336,12 +426,6 @@ impl TerminalPane {
         let display_state = DisplayState::default();
         let size = display_state.size;
 
-        let listener = Listener::new();
-        let config = Config::default();
-        let term = Term::new(config, &size, listener.clone());
-        let term = Arc::new(Mutex::new(term));
-        let processor = Arc::new(Mutex::new(Processor::new()));
-
         let (pty, spawn_error) =
             match PtyHandler::spawn_command(size.rows, size.cols, command, args, None) {
                 Ok(pty) => (Some(pty), None),
@@ -350,6 +434,13 @@ impl TerminalPane {
                     (None, Some(e.to_string()))
                 }
             };
+        let pty_arc = Arc::new(Mutex::new(pty));
+
+        let listener = Listener::new(pty_arc.clone());
+        let config = Config::default();
+        let term = Term::new(config, &size, listener.clone());
+        let term = Arc::new(Mutex::new(term));
+        let processor = Arc::new(Mutex::new(Processor::new()));
 
         let focus_handle = cx.focus_handle().tab_stop(false);
 
@@ -361,8 +452,6 @@ impl TerminalPane {
                 user_config.font_fallbacks.clone(),
             ))
         };
-
-        let pty_arc = Arc::new(Mutex::new(pty));
 
         // Inject error message before starting VT thread
         if let Some(error) = spawn_error {
@@ -393,6 +482,7 @@ impl TerminalPane {
             copy_mode: CopyModeState::new(size.rows as usize, size.cols as usize),
             _vt_processor: vt_processor,
             progress: ProgressState::default(),
+            replay: None,
         }
     }
 
@@ -423,9 +513,9 @@ impl TerminalPane {
         // Poll the VT thread's render-needed and exited flags via GPUI timer.
         // Accesses `_vt_processor` through the entity, so no Arc sharing needed.
         cx.spawn(async move |this, cx| {
-            const ACTIVE_INTERVAL: u64 = 8;
+            const ACTIVE_INTERVAL: u64 = 4;
             const IDLE_INTERVAL: u64 = 100;
-            const IDLE_THRESHOLD: u32 = 3;
+            const IDLE_THRESHOLD: u32 = 5;
             let mut idle_count = 0u32;
 
             loop {
@@ -485,6 +575,167 @@ impl TerminalPane {
         Some(vt_processor)
     }
 
+    /// Create a replay pane that plays back a .cast recording file.
+    pub fn new_replay(
+        cx: &mut Context<Self>,
+        path: std::path::PathBuf,
+    ) -> Result<Self, anyhow::Error> {
+        let (header, events) = terminal::recording::parse_cast_file(&path)?;
+
+        let display_state = DisplayState::default();
+
+        let pty_arc: Arc<Mutex<Option<PtyHandler>>> = Arc::new(Mutex::new(None));
+        let listener = Listener::new(pty_arc.clone());
+        let config = Config::default();
+        let size = TermSize {
+            rows: header.height,
+            cols: header.width,
+        };
+        let term = Term::new(config, &size, listener.clone());
+        let term = Arc::new(Mutex::new(term));
+        let processor: Arc<Mutex<Processor>> = Arc::new(Mutex::new(Processor::new()));
+
+        let focus_handle = cx.focus_handle().tab_stop(false);
+        let user_config = settings::load_config();
+        let font_fallbacks = if user_config.font_fallbacks.is_empty() {
+            None
+        } else {
+            Some(FontFallbacks::from_fonts(
+                user_config.font_fallbacks.clone(),
+            ))
+        };
+
+        let replay = ReplayState::new(events);
+
+        // Start playback timer
+        let term_clone = term.clone();
+        let processor_clone = processor.clone();
+        cx.spawn(async move |this, cx| {
+            const TICK_MS: u64 = 16; // ~60fps
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(TICK_MS))
+                    .await;
+
+                let should_stop = this
+                    .update(cx, |pane, cx| {
+                        let replay = match pane.replay.as_mut() {
+                            Some(r) => r,
+                            None => return true,
+                        };
+                        if !replay.playing || replay.is_finished() {
+                            return replay.is_finished();
+                        }
+
+                        let delta = (TICK_MS as f64 / 1000.0) * replay.speed as f64;
+                        replay.position += delta;
+
+                        let mut fed_data = false;
+                        while replay.current_index < replay.events.len() {
+                            let event = &replay.events[replay.current_index];
+                            if event.timestamp > replay.position {
+                                break;
+                            }
+                            {
+                                let mut term_guard = term_clone.lock();
+                                let mut proc_guard = processor_clone.lock();
+                                proc_guard.advance(&mut *term_guard, &event.data);
+                            }
+                            replay.current_index += 1;
+                            fed_data = true;
+                        }
+
+                        if fed_data {
+                            cx.notify();
+                        }
+                        false
+                    })
+                    .unwrap_or(true);
+
+                if should_stop {
+                    break;
+                }
+            }
+        })
+        .detach();
+
+        Ok(Self {
+            pty: pty_arc,
+            term,
+            listener,
+            display: Arc::new(RwLock::new(display_state)),
+            dragging: false,
+            focus_handle,
+            exit_emitted: false,
+            search: SearchState::new(),
+            hovered_url: None,
+            font_fallbacks,
+            scroll_reverse: user_config.scroll_reverse,
+            copy_mode: CopyModeState::new(size.rows as usize, size.cols as usize),
+            _vt_processor: None,
+            progress: ProgressState::default(),
+            replay: Some(replay),
+        })
+    }
+
+    /// Whether this pane is in replay mode.
+    pub fn is_replay(&self) -> bool {
+        self.replay.is_some()
+    }
+
+    /// Toggle replay play/pause.
+    pub fn toggle_replay_playback(&mut self) {
+        if let Some(replay) = self.replay.as_mut() {
+            replay.toggle_play();
+        }
+    }
+
+    /// Adjust replay speed.
+    pub fn set_replay_speed(&mut self, speed: f32) {
+        if let Some(replay) = self.replay.as_mut() {
+            replay.set_speed(speed);
+        }
+    }
+
+    /// Get the current replay progress fraction (0.0 - 1.0).
+    pub fn replay_progress(&self) -> f32 {
+        self.replay
+            .as_ref()
+            .map(|r| r.progress_fraction())
+            .unwrap_or(0.0)
+    }
+
+    /// Seek replay to a fraction (0.0..=1.0) of total duration.
+    /// Replays all events from the beginning up to the target position.
+    fn seek_replay(&mut self, fraction: f32) {
+        let replay = match self.replay.as_mut() {
+            Some(r) => r,
+            None => return,
+        };
+        replay.seek_fraction(fraction);
+        let target_index = replay.current_index;
+
+        // Rebuild terminal from scratch and replay events up to the target
+        {
+            let display = self.display.read();
+            let size = TermSize {
+                cols: display.size.cols,
+                rows: display.size.rows,
+            };
+            drop(display);
+
+            let config = Config::default();
+            let new_term = Term::new(config, &size, self.listener.clone());
+            let mut term_guard = self.term.lock();
+            *term_guard = new_term;
+
+            let mut processor: Processor = Processor::new();
+            for event in &replay.events[..target_index] {
+                processor.advance(&mut *term_guard, &event.data);
+            }
+        }
+    }
+
     /// Send keyboard input to the PTY.
     ///
     /// If the write fails (e.g., broken pipe because the process exited),
@@ -505,6 +756,9 @@ impl TerminalPane {
 
     /// Check if the shell has exited
     pub fn has_exited(&self) -> bool {
+        if self.replay.is_some() {
+            return false;
+        }
         let pty_guard = self.pty.lock();
         match &*pty_guard {
             None => true,
@@ -551,6 +805,52 @@ impl TerminalPane {
     /// Get the current progress bar state (from OSC 9;4 sequences).
     pub fn progress(&self) -> ProgressState {
         self.progress
+    }
+
+    /// Start recording the current session to an asciinema v2 .cast file.
+    pub fn start_recording(&mut self) -> Result<(), anyhow::Error> {
+        if self.is_recording() {
+            return Ok(());
+        }
+        let display = self.display.read();
+        let recorder =
+            terminal::recording::SessionRecorder::new(display.size.cols, display.size.rows)?;
+        if let Some(ref vt) = self._vt_processor {
+            *vt.recorder().lock() = Some(recorder);
+        }
+        Ok(())
+    }
+
+    /// Stop recording the current session.
+    pub fn stop_recording(&mut self) {
+        if let Some(ref vt) = self._vt_processor {
+            let mut recorder_guard = vt.recorder().lock();
+            if let Some(mut recorder) = recorder_guard.take() {
+                if let Err(error) = recorder.finish() {
+                    tracing::warn!("Failed to stop recording: {}", error);
+                }
+            }
+        }
+    }
+
+    /// Whether a recording is currently active.
+    pub fn is_recording(&self) -> bool {
+        self._vt_processor
+            .as_ref()
+            .is_some_and(|vt| vt.recorder().lock().as_ref().is_some_and(|r| r.is_active()))
+    }
+
+    /// Get the current badge state for this pane.
+    pub fn badge(&self) -> TabBadge {
+        let mut pty_guard = self.pty.lock();
+        match &mut *pty_guard {
+            None => TabBadge::Success,
+            Some(handler) => match handler.exit_code() {
+                Some(0) => TabBadge::Success,
+                Some(code) => TabBadge::Failed(code),
+                None => TabBadge::Running,
+            },
+        }
     }
 
     /// Get the terminal title (set by OSC escape sequences)
@@ -2006,18 +2306,16 @@ impl Render for TerminalPane {
         let progress_state = self.progress;
         let show_pointer = self.hovered_url.is_some();
 
-        // Main container with canvas for efficient rendering
         div()
             .id("terminal-pane")
             .key_context("terminal")
             .track_focus(&focus_handle)
             .when(show_pointer, |d| d.cursor_pointer())
-            // Handle Tab/Shift-Tab actions (bound below) to send to terminal
             .on_action(cx.listener(|this, _: &SendTab, _window, _cx| {
                 this.send_input("\t");
             }))
             .on_action(cx.listener(|this, _: &SendShiftTab, _window, _cx| {
-                this.send_input("\x1b[Z"); // Shift-Tab escape sequence
+                this.send_input("\x1b[Z");
             }))
             .on_action(cx.listener(|this, _: &SearchToggle, _window, cx| {
                 this.toggle_search(cx);
@@ -2037,7 +2335,46 @@ impl Render for TerminalPane {
             .on_action(cx.listener(|this, _: &ExitCopyMode, _window, cx| {
                 this.exit_copy_mode(cx);
             }))
+            .on_action(cx.listener(|this, _: &StartRecording, _window, cx| {
+                if let Err(error) = this.start_recording() {
+                    tracing::error!("Failed to start recording: {}", error);
+                }
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &StopRecording, _window, cx| {
+                this.stop_recording();
+                cx.notify();
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                // When in replay mode, handle replay-specific keys
+                if this.replay.is_some() {
+                    let key = event.keystroke.key.as_str();
+                    match key {
+                        "space" => {
+                            this.toggle_replay_playback();
+                            cx.notify();
+                            return;
+                        }
+                        "+" | "=" => {
+                            if let Some(r) = this.replay.as_ref() {
+                                let new_speed = (r.speed * 2.0).min(8.0);
+                                this.set_replay_speed(new_speed);
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        "-" => {
+                            if let Some(r) = this.replay.as_ref() {
+                                let new_speed = (r.speed / 2.0).max(0.25);
+                                this.set_replay_speed(new_speed);
+                            }
+                            cx.notify();
+                            return;
+                        }
+                        _ => return,
+                    }
+                }
+
                 // When copy mode is active, route keys to copy mode handler
                 if this.copy_mode.active {
                     this.handle_copy_mode_key(event, cx);
@@ -2286,6 +2623,155 @@ impl Render for TerminalPane {
                                 .text_size(px(11.0))
                                 .text_color(hsla(0.0, 0.0, 0.5, 1.0))
                                 .child(match_info),
+                        ),
+                )
+            })
+            // Replay control bar overlay (rendered at bottom when in replay mode)
+            .when(self.replay.is_some(), |d| {
+                let replay = self.replay.as_ref().expect("checked above");
+                let play_icon = if replay.playing {
+                    "\u{23F8}"
+                } else {
+                    "\u{25B6}"
+                };
+                let speed_label = format!("{:.1}x", replay.speed);
+                let current_speed = replay.speed;
+                let progress_pct = (replay.progress_fraction() * 100.0) as u32;
+                let position_secs = replay.position;
+                let total_secs = replay.total_duration;
+                let time_label = format!(
+                    "{:02}:{:02} / {:02}:{:02}",
+                    position_secs as u64 / 60,
+                    position_secs as u64 % 60,
+                    total_secs as u64 / 60,
+                    total_secs as u64 % 60,
+                );
+                let finished = replay.is_finished();
+                let bar_fraction = replay.progress_fraction();
+                d.child(
+                    div()
+                        .id("replay-bar")
+                        .absolute()
+                        .bottom(px(0.0))
+                        .left(px(0.0))
+                        .w_full()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            // Progress track (clickable for seeking)
+                            div()
+                                .id("replay-progress-track")
+                                .w_full()
+                                .h(px(6.0))
+                                .bg(hsla(0.0, 0.0, 0.2, 0.8))
+                                .cursor_pointer()
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                                        let display = this.display.read();
+                                        let bounds = match display.bounds {
+                                            Some(b) => b,
+                                            None => return,
+                                        };
+                                        drop(display);
+                                        let click_x: f32 =
+                                            (event.position.x - bounds.origin.x).into();
+                                        let width: f32 = bounds.size.width.into();
+                                        if width > 0.0 {
+                                            let fraction = (click_x / width).clamp(0.0, 1.0);
+                                            this.seek_replay(fraction);
+                                            cx.notify();
+                                        }
+                                    }),
+                                )
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .bg(hsla(0.55, 0.7, 0.5, 0.9))
+                                        .w(relative(bar_fraction)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .w_full()
+                                .h(px(28.0))
+                                .bg(hsla(0.0, 0.0, 0.1, 0.92))
+                                .flex()
+                                .items_center()
+                                .px(px(12.0))
+                                .gap(px(10.0))
+                                // Play/pause button
+                                .child(
+                                    div()
+                                        .id("replay-play-btn")
+                                        .text_size(px(14.0))
+                                        .text_color(hsla(0.0, 0.0, 0.9, 1.0))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(hsla(0.55, 0.7, 0.8, 1.0)))
+                                        .on_click(cx.listener(
+                                            |this, _: &ClickEvent, _window, cx| {
+                                                this.toggle_replay_playback();
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child(if finished { "\u{23F9}" } else { play_icon }),
+                                )
+                                // Speed down button
+                                .child(
+                                    div()
+                                        .id("replay-speed-down")
+                                        .text_size(px(12.0))
+                                        .text_color(hsla(0.0, 0.0, 0.6, 1.0))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(hsla(0.0, 0.0, 0.9, 1.0)))
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _window, cx| {
+                                                let new_speed = (current_speed / 2.0).max(0.25);
+                                                this.set_replay_speed(new_speed);
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child("\u{25C0}"),
+                                )
+                                // Speed label
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(hsla(0.55, 0.5, 0.7, 1.0))
+                                        .child(speed_label),
+                                )
+                                // Speed up button
+                                .child(
+                                    div()
+                                        .id("replay-speed-up")
+                                        .text_size(px(12.0))
+                                        .text_color(hsla(0.0, 0.0, 0.6, 1.0))
+                                        .cursor_pointer()
+                                        .hover(|s| s.text_color(hsla(0.0, 0.0, 0.9, 1.0)))
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, _window, cx| {
+                                                let new_speed = (current_speed * 2.0).min(8.0);
+                                                this.set_replay_speed(new_speed);
+                                                cx.notify();
+                                            },
+                                        ))
+                                        .child("\u{25B6}"),
+                                )
+                                // Time label
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_size(px(11.0))
+                                        .text_color(hsla(0.0, 0.0, 0.6, 1.0))
+                                        .child(time_label),
+                                )
+                                // Progress percentage
+                                .child(
+                                    div()
+                                        .text_size(px(10.0))
+                                        .text_color(hsla(0.0, 0.0, 0.45, 1.0))
+                                        .child(format!("{}%", progress_pct)),
+                                ),
                         ),
                 )
             })
@@ -2887,980 +3373,5 @@ impl Focusable for TerminalPane {
 
 #[cfg(test)]
 #[allow(clippy::unnecessary_literal_unwrap)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-    use test_case::test_case;
-
-    /// Create a TextRun with proper styling based on cell flags (test helper)
-    fn create_text_run(
-        len: usize,
-        font_family: &SharedString,
-        fg: Hsla,
-        flags: CellFlags,
-    ) -> TextRun {
-        let weight = if flags.contains(CellFlags::BOLD) {
-            FontWeight::BOLD
-        } else {
-            FontWeight::NORMAL
-        };
-
-        let style = if flags.contains(CellFlags::ITALIC) {
-            FontStyle::Italic
-        } else {
-            FontStyle::Normal
-        };
-
-        let underline = if flags.intersects(
-            CellFlags::UNDERLINE
-                | CellFlags::DOUBLE_UNDERLINE
-                | CellFlags::UNDERCURL
-                | CellFlags::DOTTED_UNDERLINE
-                | CellFlags::DASHED_UNDERLINE,
-        ) {
-            Some(UnderlineStyle {
-                thickness: px(1.0),
-                color: Some(fg),
-                wavy: flags.contains(CellFlags::UNDERCURL),
-            })
-        } else {
-            None
-        };
-
-        let strikethrough = if flags.contains(CellFlags::STRIKEOUT) {
-            Some(StrikethroughStyle {
-                thickness: px(1.0),
-                color: Some(fg),
-            })
-        } else {
-            None
-        };
-
-        TextRun {
-            len,
-            font: Font {
-                family: font_family.clone(),
-                features: ligature_features(),
-                fallbacks: None,
-                weight,
-                style,
-            },
-            color: fg,
-            background_color: None,
-            underline,
-            strikethrough,
-        }
-    }
-
-    // ============================================================================
-    // Display State Tests (No GPUI required)
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_display_state_default() {
-        let display = DisplayState::default();
-
-        assert_eq!(display.size.cols, 80, "Default columns should be 80");
-        assert_eq!(display.size.rows, 24, "Default rows should be 24");
-        assert!(display.cell_dims.0 > 0.0, "Cell width should be positive");
-        assert!(display.cell_dims.1 > 0.0, "Cell height should be positive");
-        assert_eq!(
-            display.font_size, DEFAULT_FONT_SIZE,
-            "Font size should be default"
-        );
-    }
-
-    #[test_case(MIN_FONT_SIZE ; "minimum font size")]
-    #[test_case(DEFAULT_FONT_SIZE ; "default font size")]
-    #[test_case(MAX_FONT_SIZE ; "maximum font size")]
-    #[test_case(16.0 ; "custom font size")]
-    fn test_display_state_font_size_values(expected_size: f32) {
-        let display = DisplayState {
-            font_size: expected_size,
-            ..Default::default()
-        };
-        assert_eq!(display.font_size, expected_size);
-    }
-
-    // ============================================================================
-    // MouseEscBuf SGR Format Test (pane-specific: tests coordinate offset logic)
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_sgr_format() {
-        let mut buf = MouseEscBuf::new();
-        use std::fmt::Write;
-        let button = 0;
-        let col = 10;
-        let row = 5;
-        write!(buf, "\x1b[<{};{};{}M", button, col + 1, row + 1).unwrap();
-        assert_eq!(buf.as_str(), "\x1b[<0;11;6M");
-    }
-
-    // ============================================================================
-    // Text Run Creation Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_basic() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        let run = create_text_run(5, &font_family, fg, CellFlags::empty());
-
-        assert_eq!(run.len, 5);
-        assert_eq!(run.font.weight, FontWeight::NORMAL);
-        assert_eq!(run.font.style, FontStyle::Normal);
-        assert!(run.underline.is_none());
-        assert!(run.strikethrough.is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_bold() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        let run = create_text_run(5, &font_family, fg, CellFlags::BOLD);
-
-        assert_eq!(run.font.weight, FontWeight::BOLD);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_italic() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        let run = create_text_run(5, &font_family, fg, CellFlags::ITALIC);
-
-        assert_eq!(run.font.style, FontStyle::Italic);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_underline() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        let run = create_text_run(5, &font_family, fg, CellFlags::UNDERLINE);
-
-        assert!(run.underline.is_some());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_strikethrough() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        let run = create_text_run(5, &font_family, fg, CellFlags::STRIKEOUT);
-
-        assert!(run.strikethrough.is_some());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_combined_flags() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-        let flags = CellFlags::BOLD | CellFlags::ITALIC | CellFlags::UNDERLINE;
-        let run = create_text_run(5, &font_family, fg, flags);
-
-        assert_eq!(run.font.weight, FontWeight::BOLD);
-        assert_eq!(run.font.style, FontStyle::Italic);
-        assert!(run.underline.is_some());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_text_run_all_underline_variants() {
-        let font_family: SharedString = "Test".into();
-
-        for flags in [
-            CellFlags::UNDERLINE,
-            CellFlags::DOUBLE_UNDERLINE,
-            CellFlags::UNDERCURL,
-            CellFlags::DOTTED_UNDERLINE,
-            CellFlags::DASHED_UNDERLINE,
-        ] {
-            let run = create_text_run(1, &font_family, Hsla::default(), flags);
-            assert!(
-                run.underline.is_some(),
-                "Underline should be set for {:?}",
-                flags
-            );
-        }
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_text_run_undercurl_is_wavy() {
-        let font_family: SharedString = "Test".into();
-        let run = create_text_run(1, &font_family, Hsla::default(), CellFlags::UNDERCURL);
-
-        let underline = run.underline.unwrap();
-        assert!(underline.wavy, "Undercurl should have wavy=true");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_create_text_run_all_flags_combined() {
-        let font_family: SharedString = "Test Font".into();
-        let fg = Hsla::default();
-
-        let all_flags = CellFlags::BOLD
-            | CellFlags::ITALIC
-            | CellFlags::UNDERLINE
-            | CellFlags::STRIKEOUT
-            | CellFlags::DIM
-            | CellFlags::INVERSE
-            | CellFlags::HIDDEN;
-
-        let run = create_text_run(5, &font_family, fg, all_flags);
-
-        assert_eq!(run.font.weight, FontWeight::BOLD);
-        assert_eq!(run.font.style, FontStyle::Italic);
-        assert!(run.underline.is_some());
-        assert!(run.strikethrough.is_some());
-    }
-
-    // ============================================================================
-    // Listener Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_listener_new() {
-        let listener = Listener::new();
-        assert!(listener.title.lock().is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_title_event() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-
-        listener.send_event(alacritty_terminal::event::Event::Title(
-            "Test Title".to_string(),
-        ));
-
-        let title = listener.title.lock();
-        assert_eq!(title.as_deref(), Some("Test Title"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_clone() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-        listener.send_event(alacritty_terminal::event::Event::Title(
-            "Original".to_string(),
-        ));
-
-        let cloned = listener.clone();
-        assert_eq!(cloned.title.lock().as_deref(), Some("Original"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_empty_title() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-
-        listener.send_event(alacritty_terminal::event::Event::Title(String::new()));
-
-        let title = listener.title.lock();
-        assert_eq!(title.as_deref(), Some(""));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_very_long_title() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-
-        let long_title = "A".repeat(10000);
-        listener.send_event(alacritty_terminal::event::Event::Title(long_title.clone()));
-
-        let title = listener.title.lock();
-        assert_eq!(title.as_deref(), Some(long_title.as_str()));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_unicode_title() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-
-        let unicode_title = "Terminal \u{1F600} \u{4E2D}\u{6587} \u{0414}\u{0440}\u{0443}\u{0433}";
-        listener.send_event(alacritty_terminal::event::Event::Title(
-            unicode_title.to_string(),
-        ));
-
-        let title = listener.title.lock();
-        assert_eq!(title.as_deref(), Some(unicode_title));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_title_overwrite() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-
-        listener.send_event(alacritty_terminal::event::Event::Title("First".to_string()));
-        assert_eq!(listener.title.lock().as_deref(), Some("First"));
-
-        listener.send_event(alacritty_terminal::event::Event::Title(
-            "Second".to_string(),
-        ));
-        assert_eq!(listener.title.lock().as_deref(), Some("Second"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_reset_title_event() {
-        use alacritty_terminal::event::EventListener;
-        let listener = Listener::new();
-
-        listener.send_event(alacritty_terminal::event::Event::Title(
-            "My Title".to_string(),
-        ));
-        assert_eq!(listener.title.lock().as_deref(), Some("My Title"));
-
-        listener.send_event(alacritty_terminal::event::Event::ResetTitle);
-        assert!(listener.title.lock().is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_new_has_no_cwd() {
-        let listener = Listener::new();
-        assert!(listener.cwd.lock().is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_new_has_no_prompt_line() {
-        let listener = Listener::new();
-        assert!(listener.last_prompt_line.lock().is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_cwd_direct_write() {
-        let listener = Listener::new();
-        // Simulate what a future OSC 7 pre-parser would do.
-        *listener.cwd.lock() = Some("/home/user/project".to_string());
-        assert_eq!(listener.cwd.lock().as_deref(), Some("/home/user/project"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_cwd_overwrite() {
-        let listener = Listener::new();
-        *listener.cwd.lock() = Some("/first".to_string());
-        *listener.cwd.lock() = Some("/second".to_string());
-        assert_eq!(listener.cwd.lock().as_deref(), Some("/second"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_prompt_line_direct_write() {
-        let listener = Listener::new();
-        // Simulate what a future OSC 133 pre-parser would do.
-        *listener.last_prompt_line.lock() = Some(42);
-        assert_eq!(*listener.last_prompt_line.lock(), Some(42));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_prompt_line_overwrite() {
-        let listener = Listener::new();
-        *listener.last_prompt_line.lock() = Some(10);
-        *listener.last_prompt_line.lock() = Some(25);
-        assert_eq!(*listener.last_prompt_line.lock(), Some(25));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_clone_preserves_cwd() {
-        let listener = Listener::new();
-        *listener.cwd.lock() = Some("/tmp/test".to_string());
-
-        let cloned = listener.clone();
-        assert_eq!(cloned.cwd.lock().as_deref(), Some("/tmp/test"));
-
-        // Arc-shared: mutation through clone is visible in original.
-        *cloned.cwd.lock() = Some("/tmp/other".to_string());
-        assert_eq!(listener.cwd.lock().as_deref(), Some("/tmp/other"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_listener_clone_preserves_prompt_line() {
-        let listener = Listener::new();
-        *listener.last_prompt_line.lock() = Some(7);
-
-        let cloned = listener.clone();
-        assert_eq!(*cloned.last_prompt_line.lock(), Some(7));
-    }
-
-    // ============================================================================
-    // Pixel to Cell Conversion Logic Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_pixel_to_cell_calculation() {
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        let local_x = 25.0_f32;
-        let local_y = 45.0_f32;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
-
-        assert_eq!(cell_x, 2);
-        assert_eq!(cell_y, 2);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_pixel_to_cell_negative_result() {
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        let local_x = 0.0_f32;
-        let local_y = 0.0_f32;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
-
-        assert!(cell_x < 0);
-        assert!(cell_y < 0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_pixel_to_cell_calculation_zero_cell_size() {
-        let cell_width = 0.0_f32;
-        let cell_height = 0.0_f32;
-
-        let cell_x = if cell_width > 0.0 {
-            ((100.0_f32 - PADDING) / cell_width).floor() as i32
-        } else {
-            0
-        };
-
-        let cell_y = if cell_height > 0.0 {
-            ((100.0_f32 - PADDING) / cell_height).floor() as i32
-        } else {
-            0
-        };
-
-        assert_eq!(cell_x, 0);
-        assert_eq!(cell_y, 0);
-    }
-
-    // ============================================================================
-    // Mouse Escape Buffer Edge Cases (pane-specific: all buttons, release format)
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_all_buttons() {
-        use std::fmt::Write;
-
-        for button in [0, 1, 2, 64, 65] {
-            let mut buf = MouseEscBuf::new();
-            write!(buf, "\x1b[<{};10;10M", button).unwrap();
-            assert!(buf.as_str().contains(&format!("{}", button)));
-        }
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_release_format() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-        write!(buf, "\x1b[<0;10;10m").unwrap();
-        assert!(buf.as_str().ends_with('m'));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_esc_buf_negative_coordinate_handling() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        let large_num = u32::MAX;
-        let _ = write!(buf, "\x1b[<0;{};1M", large_num);
-        assert!(buf.as_str().len() <= 32);
-    }
-
-    // ============================================================================
-    // Malformed Escape Sequences
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_incomplete() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        write!(buf, "\x1b[<0;10;10").unwrap();
-        assert!(buf.as_str().starts_with("\x1b"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_wrong_terminator() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        write!(buf, "\x1b[<0;10;10Z").unwrap();
-        assert_eq!(buf.as_str(), "\x1b[<0;10;10Z");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_extra_semicolons() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        write!(buf, "\x1b[<0;;10;10M").unwrap();
-        assert!(buf.as_str().contains(";;"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_escape_sequence_missing_bracket() {
-        use std::fmt::Write;
-        let mut buf = MouseEscBuf::new();
-
-        write!(buf, "\x1b<0;10;10M").unwrap();
-        assert!(!buf.as_str().contains("["));
-    }
-
-    // ============================================================================
-    // Terminal Size Calculation Overflow Test
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_terminal_size_calculation_prevents_overflow() {
-        let bounds_width = 10000.0_f32;
-        let bounds_height = 10000.0_f32;
-        let cell_width = 0.01_f32;
-        let cell_height = 0.01_f32;
-        let padding = PADDING;
-
-        let cols = ((bounds_width - padding * 2.0).max(0.0) / cell_width).floor() as u16;
-        let rows = ((bounds_height - padding * 2.0).max(0.0) / cell_height).floor() as u16;
-
-        // Verify we got large values (saturates at u16::MAX)
-        assert!(cols > 0);
-        assert!(rows > 0);
-    }
-
-    // ============================================================================
-    // Mouse Event Coordinate Edge Cases
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_coordinate_at_origin() {
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        let cell_x = ((padding - padding) / cell_width).floor() as i32;
-        let cell_y = ((padding - padding) / cell_height).floor() as i32;
-
-        assert_eq!(cell_x, 0);
-        assert_eq!(cell_y, 0);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_coordinate_at_max_cell() {
-        let cols = 80;
-        let rows = 24;
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        let local_x = padding + (cols as f32 - 0.5) * cell_width;
-        let local_y = padding + (rows as f32 - 0.5) * cell_height;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
-
-        assert_eq!(cell_x, cols - 1);
-        assert_eq!(cell_y, rows - 1);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_mouse_coordinate_past_terminal() {
-        let cols = 80;
-        let rows = 24;
-        let cell_width = 10.0_f32;
-        let cell_height = 20.0_f32;
-        let padding = PADDING;
-
-        let local_x = padding + (cols as f32 + 10.0) * cell_width;
-        let local_y = padding + (rows as f32 + 10.0) * cell_height;
-
-        let cell_x = ((local_x - padding) / cell_width).floor() as i32;
-        let cell_y = ((local_y - padding) / cell_height).floor() as i32;
-
-        assert!(cell_x >= cols);
-        assert!(cell_y >= rows);
-    }
-
-    // ============================================================================
-    // Wide Character Placeholder Test
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_render_cell_wide_character_placeholder() {
-        let cell = RenderCell {
-            row: 0,
-            col: 1,
-            c: ' ',
-            fg: Hsla::default(),
-            flags: CellFlags::WIDE_CHAR_SPACER,
-        };
-
-        assert!(cell.flags.contains(CellFlags::WIDE_CHAR_SPACER));
-    }
-
-    // ============================================================================
-    // BgRegion Edge Cases (pane-specific: inverted columns with saturating_sub)
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_bg_region_inverted_columns() {
-        let region = BgRegion {
-            row: 0,
-            col_start: 20,
-            col_end: 10,
-            color: Hsla::default(),
-        };
-
-        let width = region.col_end.saturating_sub(region.col_start);
-        assert_eq!(width, 0);
-    }
-
-    // ============================================================================
-    // CursorInfo Edge Cases (pane-specific: Hidden and HollowBlock shapes)
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_cursor_info_hidden_shape() {
-        let cursor = CursorInfo {
-            row: 10,
-            col: 20,
-            shape: CursorShape::Hidden,
-            color: Hsla::default(),
-        };
-
-        assert!(matches!(cursor.shape, CursorShape::Hidden));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_cursor_info_hollow_block() {
-        let cursor = CursorInfo {
-            row: 5,
-            col: 5,
-            shape: CursorShape::HollowBlock,
-            color: Hsla::default(),
-        };
-
-        assert!(matches!(cursor.shape, CursorShape::HollowBlock));
-    }
-
-    // ========================================================================
-    // URL Detection Tests
-    // ========================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_basic_https() {
-        let line = "Check out https://example.com for more info";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 10),
-            Some("https://example.com".to_string())
-        );
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 28),
-            Some("https://example.com".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_basic_http() {
-        let line = "Visit http://example.com today";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 6),
-            Some("http://example.com".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_with_path() {
-        let line = "See https://github.com/user/repo/blob/main/file.rs";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 20),
-            Some("https://github.com/user/repo/blob/main/file.rs".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_with_query_params() {
-        let line = "Link: https://search.com/q?query=test&page=1";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 10),
-            Some("https://search.com/q?query=test&page=1".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_strips_trailing_punctuation() {
-        let line = "Check https://example.com.";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 10),
-            Some("https://example.com".to_string())
-        );
-
-        let line = "See https://example.com, then continue";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 10),
-            Some("https://example.com".to_string())
-        );
-
-        let line = "(https://example.com)";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 5),
-            Some("https://example.com".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_no_url() {
-        let line = "This line has no URLs";
-        assert_eq!(TerminalPane::find_url_at_position(line, 5), None);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_click_outside_url() {
-        let line = "Before https://example.com after";
-        assert_eq!(TerminalPane::find_url_at_position(line, 0), None);
-        assert_eq!(TerminalPane::find_url_at_position(line, 28), None);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_multiple_urls() {
-        let line = "First https://a.com then https://b.com end";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 8),
-            Some("https://a.com".to_string())
-        );
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 28),
-            Some("https://b.com".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_with_port() {
-        let line = "Local: http://localhost:8080/api";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 10),
-            Some("http://localhost:8080/api".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_with_fragment() {
-        let line = "Docs: https://docs.rs/crate#section";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 10),
-            Some("https://docs.rs/crate#section".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_with_unicode_before() {
-        let line = "\u{1F680} Check http://localhost:4321/ for updates";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 9),
-            Some("http://localhost:4321/".to_string())
-        );
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 15),
-            Some("http://localhost:4321/".to_string())
-        );
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_find_url_with_ansi_prompt() {
-        let line = "~/projects \u{279C} http://localhost:8080/api";
-        assert_eq!(
-            TerminalPane::find_url_at_position(line, 15),
-            Some("http://localhost:8080/api".to_string())
-        );
-    }
-
-    // ============================================================================
-    // Search State Tests
-    // ============================================================================
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_default() {
-        let state = SearchState::new();
-        assert!(!state.active);
-        assert!(state.query.is_empty());
-        assert!(state.matches.is_empty());
-        assert_eq!(state.current_match, 0);
-        assert!(!state.regex_mode);
-        assert!(state.compiled_regex.is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_recompile_regex_valid_pattern() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = "foo.*bar".to_string();
-        state.recompile_regex();
-        assert!(state.compiled_regex.is_some());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_recompile_regex_invalid_pattern() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = "[invalid(regex".to_string();
-        state.recompile_regex();
-        assert!(state.compiled_regex.is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_recompile_regex_empty_query() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = String::new();
-        state.recompile_regex();
-        assert!(state.compiled_regex.is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_recompile_regex_not_in_regex_mode() {
-        let mut state = SearchState::new();
-        state.regex_mode = false;
-        state.query = "foo".to_string();
-        state.recompile_regex();
-        assert!(state.compiled_regex.is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_is_case_insensitive() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = "hello".to_string();
-        state.recompile_regex();
-        let re = state.compiled_regex.as_ref().unwrap();
-        assert!(re.is_match("HELLO"));
-        assert!(re.is_match("Hello"));
-        assert!(re.is_match("hello"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_character_class() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = r"\d+".to_string();
-        state.recompile_regex();
-        let re = state.compiled_regex.as_ref().unwrap();
-        assert!(re.is_match("abc123def"));
-        assert!(!re.is_match("abcdef"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_alternation() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = "foo|bar".to_string();
-        state.recompile_regex();
-        let re = state.compiled_regex.as_ref().unwrap();
-        assert!(re.is_match("foo"));
-        assert!(re.is_match("bar"));
-        assert!(!re.is_match("baz"));
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_find_positions() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = r"h.llo".to_string();
-        state.recompile_regex();
-        let re = state.compiled_regex.as_ref().unwrap();
-        let text = "hello world";
-        let matched = re.find(text).unwrap();
-        assert_eq!(matched.start(), 0);
-        assert_eq!(matched.end(), 5);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_multibyte_byte_to_col_mapping() {
-        let chars: Vec<char> = "ab\u{00E9}cd".chars().collect();
-        let line_string: String = chars.iter().collect();
-
-        let mut byte_to_col: Vec<usize> = Vec::new();
-        for (col_idx, ch) in chars.iter().enumerate() {
-            for _ in 0..ch.len_utf8() {
-                byte_to_col.push(col_idx);
-            }
-        }
-        byte_to_col.push(chars.len());
-
-        // 'a' at byte 0 -> col 0
-        assert_eq!(byte_to_col[0], 0);
-        // 'b' at byte 1 -> col 1
-        assert_eq!(byte_to_col[1], 1);
-        // '\u{00E9}' takes 2 bytes, starts at byte 2 -> col 2
-        assert_eq!(byte_to_col[2], 2);
-        assert_eq!(byte_to_col[3], 2);
-        // 'c' at byte 4 -> col 3
-        assert_eq!(byte_to_col[4], 3);
-        // 'd' at byte 5 -> col 4
-        assert_eq!(byte_to_col[5], 4);
-
-        let re = regex::Regex::new(r"\u{00E9}c").unwrap();
-        let matched = re.find(&line_string).unwrap();
-        let start_col = byte_to_col[matched.start()];
-        let end_col = byte_to_col[matched.end()];
-        assert_eq!(start_col, 2);
-        assert_eq!(end_col, 4);
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_toggle_clears_compiled() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = "test".to_string();
-        state.recompile_regex();
-        assert!(state.compiled_regex.is_some());
-
-        state.regex_mode = false;
-        state.recompile_regex();
-        assert!(state.compiled_regex.is_none());
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_multiple_matches_in_line() {
-        let mut state = SearchState::new();
-        state.regex_mode = true;
-        state.query = r"\d+".to_string();
-        state.recompile_regex();
-        let re = state.compiled_regex.as_ref().unwrap();
-
-        let text = "abc 123 def 456 ghi";
-        let matches: Vec<_> = re.find_iter(text).collect();
-        assert_eq!(matches.len(), 2);
-        assert_eq!(matches[0].as_str(), "123");
-        assert_eq!(matches[1].as_str(), "456");
-    }
-
-    #[::core::prelude::v1::test]
-    fn test_search_state_regex_empty_match_skipped() {
-        let chars: Vec<char> = "hello".chars().collect();
-        let line_string: String = chars.iter().collect();
-
-        let mut byte_to_col: Vec<usize> = Vec::new();
-        for (col_idx, ch) in chars.iter().enumerate() {
-            for _ in 0..ch.len_utf8() {
-                byte_to_col.push(col_idx);
-            }
-        }
-        byte_to_col.push(chars.len());
-
-        // A regex like "h?" could match empty string, but we only push
-        // matches where start_col < end_col
-        let re = regex::Regex::new("(?i)h?").unwrap();
-        let mut results = Vec::new();
-        for matched in re.find_iter(&line_string) {
-            let start_col = byte_to_col[matched.start()];
-            let end_col = byte_to_col[matched.end()];
-            if start_col < end_col {
-                results.push((start_col, end_col));
-            }
-        }
-        assert!(results.contains(&(0, 1)));
-        for (start, end) in &results {
-            assert!(start < end);
-        }
-    }
-}
+#[path = "pane_tests.rs"]
+mod tests;

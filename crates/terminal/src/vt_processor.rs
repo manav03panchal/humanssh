@@ -7,6 +7,7 @@
 //! Signaling to the UI uses a simple `AtomicBool` render-needed flag that GPUI
 //! polls via a lightweight timer, avoiding async channel dependencies.
 
+use crate::recording::SessionRecorder;
 use crate::types::ProgressState;
 use alacritty_terminal::event::EventListener;
 use alacritty_terminal::term::Term;
@@ -18,8 +19,9 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Minimum interval between render signals (16ms = 60fps cap).
-const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// Minimum interval between render signals.
+/// Keep this low — the GPUI poll timer already throttles actual repaints.
+const MIN_FRAME_INTERVAL: Duration = Duration::from_millis(4);
 
 /// Timeout for blocking recv when no PTY output is available.
 /// Keeps the thread responsive to shutdown signals during idle.
@@ -38,6 +40,7 @@ pub struct TerminalProcessor {
     render_needed: Arc<AtomicBool>,
     exited_flag: Arc<AtomicBool>,
     progress: Arc<Mutex<ProgressState>>,
+    recorder: Arc<Mutex<Option<SessionRecorder>>>,
 }
 
 impl TerminalProcessor {
@@ -60,11 +63,13 @@ impl TerminalProcessor {
         let shutdown = Arc::new(AtomicBool::new(false));
         let render_needed = Arc::new(AtomicBool::new(false));
         let progress = Arc::new(Mutex::new(ProgressState::default()));
+        let recorder = Arc::new(Mutex::new(None));
 
         let shutdown_clone = shutdown.clone();
         let render_needed_clone = render_needed.clone();
         let exited_clone = exited.clone();
         let progress_clone = progress.clone();
+        let recorder_clone = recorder.clone();
 
         thread::Builder::new()
             .name("humanssh-vt-processor".into())
@@ -77,6 +82,7 @@ impl TerminalProcessor {
                     render_needed_clone,
                     shutdown_clone,
                     progress_clone,
+                    recorder_clone,
                 );
             })
             .expect("failed to spawn VT processing thread");
@@ -86,6 +92,7 @@ impl TerminalProcessor {
             render_needed,
             exited_flag: exited,
             progress,
+            recorder,
         }
     }
 
@@ -102,6 +109,14 @@ impl TerminalProcessor {
     /// Get the current progress bar state (set by OSC 9;4 sequences).
     pub fn progress(&self) -> ProgressState {
         *self.progress.lock()
+    }
+
+    /// Get a shared reference to the recorder slot.
+    ///
+    /// The caller can set or clear the recorder; the VT thread will tee
+    /// output to it when present.
+    pub fn recorder(&self) -> &Arc<Mutex<Option<SessionRecorder>>> {
+        &self.recorder
     }
 }
 
@@ -126,6 +141,7 @@ fn vt_thread_loop<L: EventListener>(
     render_needed: Arc<AtomicBool>,
     shutdown: Arc<AtomicBool>,
     progress: Arc<Mutex<ProgressState>>,
+    recorder: Arc<Mutex<Option<SessionRecorder>>>,
 ) {
     // Start in the past so the first batch of data always triggers a signal
     let mut last_signal = Instant::now() - MIN_FRAME_INTERVAL;
@@ -144,6 +160,17 @@ fn vt_thread_loop<L: EventListener>(
                 batch_buffer.extend_from_slice(&data);
                 while let Ok(more) = output_rx.try_recv() {
                     batch_buffer.extend_from_slice(&more);
+                }
+
+                // Tee output to session recorder if active
+                {
+                    let mut recorder_guard = recorder.lock();
+                    if let Some(ref mut rec) = *recorder_guard {
+                        if let Err(error) = rec.record_output(&batch_buffer) {
+                            tracing::warn!("Recording error, stopping: {}", error);
+                            *recorder_guard = None;
+                        }
+                    }
                 }
 
                 // Intercept OSC 9;4 sequences before alacritty processes them

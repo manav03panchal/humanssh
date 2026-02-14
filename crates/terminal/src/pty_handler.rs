@@ -275,6 +275,9 @@ pub struct PtyHandler {
     _reader_thread: thread::JoinHandle<()>,
     /// Cached process detection results (avoids blocking UI)
     process_cache: parking_lot::Mutex<ProcessCache>,
+    /// Cached exit code (0 = success, non-zero = failure).
+    /// Populated lazily on first query after process exits.
+    cached_exit_code: Option<i32>,
 }
 
 impl PtyHandler {
@@ -335,6 +338,8 @@ impl PtyHandler {
         }
 
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("COLORFGBG", "15;0");
 
         // Set working directory if provided
         if let Some(dir) = working_dir {
@@ -445,6 +450,7 @@ impl PtyHandler {
             child,
             _reader_thread: reader_thread,
             process_cache: parking_lot::Mutex::new(ProcessCache::default()),
+            cached_exit_code: None,
         })
     }
 
@@ -482,6 +488,8 @@ impl PtyHandler {
             cmd.arg(*arg);
         }
         cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
+        cmd.env("COLORFGBG", "15;0");
 
         // Set working directory if provided
         if let Some(dir) = working_dir {
@@ -562,6 +570,7 @@ impl PtyHandler {
             child,
             _reader_thread: reader_thread,
             process_cache: parking_lot::Mutex::new(ProcessCache::default()),
+            cached_exit_code: None,
         })
     }
 
@@ -587,6 +596,37 @@ impl PtyHandler {
     /// Check if the PTY process has exited
     pub fn has_exited(&self) -> bool {
         self.exited.load(Ordering::SeqCst)
+    }
+
+    /// Get the exit code of the PTY process, if it has exited.
+    ///
+    /// Returns `None` if the process is still running. Once the process exits,
+    /// the result is cached. `portable_pty::ExitStatus` only exposes `.success()`,
+    /// so we return 0 for success and 1 for failure.
+    pub fn exit_code(&mut self) -> Option<i32> {
+        if let Some(code) = self.cached_exit_code {
+            return Some(code);
+        }
+        if !self.has_exited() {
+            return None;
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) => {
+                let code = if status.success() { 0 } else { 1 };
+                self.cached_exit_code = Some(code);
+                Some(code)
+            }
+            Ok(None) => {
+                // Process marked as exited but status not yet available
+                self.cached_exit_code = Some(0);
+                Some(0)
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Failed to get exit status, assuming success");
+                self.cached_exit_code = Some(0);
+                Some(0)
+            }
+        }
     }
 
     /// Resize the PTY
@@ -3190,6 +3230,59 @@ mod tests {
         // Error chain should include all contexts
         let chain: Vec<_> = err.chain().collect();
         assert!(chain.len() >= 2);
+    }
+
+    // ========================================================================
+    // Exit Code Tests
+    // ========================================================================
+
+    #[test]
+    fn test_exit_code_returns_none_before_exit() {
+        // Use a real PtyHandler: spawn a shell, check exit_code before it exits
+        let mut handler = PtyHandler::spawn(24, 80).expect("Failed to spawn PTY");
+        assert_eq!(
+            handler.exit_code(),
+            None,
+            "Running process should have no exit code"
+        );
+        // Clean up
+        drop(handler);
+    }
+
+    #[test]
+    fn test_exit_code_returns_some_after_exit() {
+        let mut handler = PtyHandler::spawn(24, 80).expect("Failed to spawn PTY");
+        // Send exit command to terminate the shell
+        handler.write(b"exit\n").expect("Failed to write to PTY");
+        // Wait for exit
+        for _ in 0..100 {
+            if handler.has_exited() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(handler.has_exited(), "Process should have exited");
+        let code = handler.exit_code();
+        assert_eq!(code, Some(0), "Clean exit should return code 0");
+    }
+
+    #[test]
+    fn test_exit_code_caches_result() {
+        let mut handler = PtyHandler::spawn(24, 80).expect("Failed to spawn PTY");
+        handler.write(b"exit\n").expect("Failed to write to PTY");
+        for _ in 0..100 {
+            if handler.has_exited() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(handler.has_exited());
+        let first_call = handler.exit_code();
+        let second_call = handler.exit_code();
+        assert_eq!(
+            first_call, second_call,
+            "Exit code should be cached and consistent"
+        );
     }
 
     // ========================================================================

@@ -26,7 +26,7 @@
 
 use gpui::{AnyElement, App, Entity, FocusHandle, IntoElement, SharedString, Window};
 use terminal::ProgressState;
-use terminal_view::TerminalPane;
+use terminal_view::{TabBadge, TerminalPane};
 
 /// Type-safe enum for different pane types.
 ///
@@ -85,6 +85,20 @@ impl PaneKind {
     pub fn progress(&self, cx: &App) -> ProgressState {
         match self {
             PaneKind::Terminal(terminal) => terminal.read(cx).progress(),
+        }
+    }
+
+    /// Get the badge state for tab annotations.
+    pub fn badge(&self, cx: &App) -> TabBadge {
+        match self {
+            PaneKind::Terminal(terminal) => terminal.read(cx).badge(),
+        }
+    }
+
+    /// Whether this pane is currently recording its session.
+    pub fn is_recording(&self, cx: &App) -> bool {
+        match self {
+            PaneKind::Terminal(terminal) => terminal.read(cx).is_recording(),
         }
     }
 

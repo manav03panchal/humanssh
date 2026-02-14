@@ -5,6 +5,7 @@
 //! (gpui types like Hsla and SharedString are used for data representation only.)
 
 mod pty_handler;
+pub mod recording;
 pub mod types;
 pub mod vt_processor;
 
